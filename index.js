@@ -192,6 +192,17 @@ for (const [channel, key] of sidechannelOwnerEntries) {
   const normalizedKey = key.trim().toLowerCase();
   if (channel && normalizedKey) sidechannelOwnerMap.set(channel.trim(), normalizedKey);
 }
+
+const sidechannelDefaultOwnerRaw =
+  (flags['sidechannel-default-owner'] && String(flags['sidechannel-default-owner'])) ||
+  env.SIDECHANNEL_DEFAULT_OWNER ||
+  '';
+const sidechannelDefaultOwner = sidechannelDefaultOwnerRaw
+  ? String(sidechannelDefaultOwnerRaw).trim().toLowerCase()
+  : null;
+if (sidechannelDefaultOwner && !/^[0-9a-f]{64}$/.test(sidechannelDefaultOwner)) {
+  throw new Error('Invalid --sidechannel-default-owner. Provide 32-byte hex (64 chars).');
+}
 const sidechannelOwnerWriteOnlyRaw =
   (flags['sidechannel-owner-write-only'] && String(flags['sidechannel-owner-write-only'])) ||
   env.SIDECHANNEL_OWNER_WRITE_ONLY ||
@@ -454,6 +465,7 @@ const sidechannel = new Sidechannel(peer, {
   ownerWriteOnly: sidechannelOwnerWriteOnly,
   ownerWriteChannels: sidechannelOwnerWriteChannels || undefined,
   ownerKeys: sidechannelOwnerMap.size > 0 ? sidechannelOwnerMap : undefined,
+  defaultOwnerKey: sidechannelDefaultOwner || undefined,
   welcomeByChannel: sidechannelWelcomeMap.size > 0 ? sidechannelWelcomeMap : undefined,
   onMessage: scBridgeEnabled
     ? (channel, payload, connection) => scBridge.handleSidechannelMessage(channel, payload, connection)

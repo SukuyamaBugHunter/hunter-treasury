@@ -253,12 +253,14 @@ Sidechannels:
 - `--sidechannel-pow-channels "chan1,chan2"` : require PoW only on these channels (overrides entry toggle).
 - `--sidechannel-invite-required 0|1` : require signed invites (capabilities) for protected channels.
 - `--sidechannel-invite-channels "chan1,chan2"` : require invites only on these channels (otherwise all).
+- `--sidechannel-invite-prefixes "swap:,priv:"` : require invites only on channels with these prefixes (useful for dynamic private channels).
 - `--sidechannel-inviter-keys "<pubkey1,pubkey2>"` : trusted inviter **peer pubkeys** (hex). Needed so joiners accept admin messages.
 - `--sidechannel-invite-ttl <sec>` : default TTL for invites created via `/sc_invite` (default: 604800 = 7 days).
   - **Invite identity:** invites are signed/verified against the **peer P2P pubkey (hex)**. The invite payload may also include the inviter’s **trac address** for payment/settlement, but validation uses the peer key.
 - **Invite-only join:** peers must hold a valid invite (or be an approved inviter) before they can join protected channels; uninvited joins are rejected.
 - `--sidechannel-welcome-required 0|1` : require a **signed welcome** for all sidechannels (**default: on**, **except `0000intercom` which is always open**).
 - `--sidechannel-owner "<chan:pubkey,chan2:pubkey>"` : channel **owner** peer pubkey (hex). This key signs the welcome and is the source of truth.
+- `--sidechannel-default-owner "<pubkey>"` : default channel owner peer pubkey (hex) for channels not listed in `--sidechannel-owner` (useful for dynamic channels).
 - `--sidechannel-owner-write-only 0|1` : **owner‑only send** for all sidechannels (non‑owners can join/read, their sends are rejected).
 - `--sidechannel-owner-write-channels "chan1,chan2"` : owner‑only send for these channels only.
 - `--sidechannel-welcome "<chan:welcome_b64,chan2:welcome_b64>"` : **pre‑signed welcome** per channel (from `/sc_welcome`). Optional for `0000intercom`, required for non‑entry channels if welcome enforcement is on.
