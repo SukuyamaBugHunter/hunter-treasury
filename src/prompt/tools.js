@@ -368,6 +368,46 @@ export const INTERCOMSWAP_TOOLS = [
     required: ['mint', 'to', 'amount'],
   }),
 
+  tool(
+    'intercomswap_sol_trade_config_get',
+    'Get trade fee config (per fee_collector).',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        fee_collector: base58Param,
+      },
+      required: ['fee_collector'],
+    }
+  ),
+  tool(
+    'intercomswap_sol_trade_config_set',
+    'Init/set trade fee config (fee_collector authority required).',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        fee_bps: { type: 'integer', minimum: 0, maximum: 1000 },
+        fee_collector: base58Param,
+      },
+      required: ['fee_bps', 'fee_collector'],
+    }
+  ),
+  tool(
+    'intercomswap_sol_trade_fees_withdraw',
+    'Withdraw accrued trade fees for the configured fee_collector.',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        mint: base58Param,
+        to: base58Param,
+        amount: atomicAmountParam,
+      },
+      required: ['mint', 'to', 'amount'],
+    }
+  ),
+
   // Receipts / recovery (local-only, deterministic).
   tool('intercomswap_receipts_list', 'List local trade receipts (sqlite).', emptyParams),
   tool('intercomswap_receipts_show', 'Show a local receipt by trade_id.', {
