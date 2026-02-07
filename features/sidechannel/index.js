@@ -875,6 +875,56 @@ class Sidechannel extends Feature {
     return true;
   }
 
+  async removeChannel(name) {
+    const channel = String(name || '').trim();
+    if (!channel) return false;
+    const entry = this.channels.get(channel);
+    if (!entry) return false;
+
+    // Close mux protocol channels for this topic across all active connections.
+    for (const [, perConn] of this.connections.entries()) {
+      const record = perConn.get(entry.name);
+      if (record) {
+        try {
+          record?.channel?.close?.();
+        } catch (_e) {}
+        perConn.delete(entry.name);
+      }
+      try {
+        perConn?._openRetries?.delete?.(entry.name);
+      } catch (_e) {}
+      try {
+        perConn?._paired?.delete?.(entry.protocol);
+      } catch (_e) {}
+    }
+
+    const normalized = normalizeChannel(entry.name);
+
+    // Drop in-memory per-channel state to avoid unbounded growth from ephemeral swap channels.
+    this.channels.delete(entry.name);
+    this.invitedPeers.delete(entry.name);
+    this.localInvites.delete(normalized);
+    this.localInviteObjects.delete(normalized);
+    this.welcomeByChannel.delete(normalized);
+    this.welcomedChannels.delete(normalized);
+
+    // Best-effort: stop swarm discovery for the topic if supported.
+    if (this.started && this.peer?.swarm) {
+      try {
+        if (typeof this.peer.swarm.leave === 'function') {
+          this.peer.swarm.leave(entry.topic);
+        }
+      } catch (_e) {}
+      try {
+        if (typeof this.peer.swarm.flush === 'function') {
+          await this.peer.swarm.flush();
+        }
+      } catch (_e) {}
+    }
+
+    return true;
+  }
+
   acceptInvite(name, invite = null, welcome = null) {
     const channel = String(name || '').trim();
     if (!channel) return false;

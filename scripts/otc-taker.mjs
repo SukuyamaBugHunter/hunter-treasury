@@ -334,6 +334,12 @@ async function main() {
     }, delay);
   };
 
+  const leaveSidechannel = async (channel) => {
+    try {
+      await sc.leave(channel);
+    } catch (_e) {}
+  };
+
   const resendRfqTimer = setInterval(async () => {
     try {
       if (chosen) return;
@@ -616,6 +622,7 @@ async function main() {
       done = true;
       clearTimers();
       process.stdout.write(`${JSON.stringify({ type: 'stopped_after_ln_pay', trade_id: tradeId, swap_channel: swapChannel })}\n`);
+      await leaveSidechannel(swapChannel);
       try {
         receipts?.close();
       } catch (_e) {}
@@ -672,6 +679,7 @@ async function main() {
     clearTimers();
     process.stdout.write(`${JSON.stringify({ type: 'swap_done', trade_id: tradeId, swap_channel: swapChannel })}\n`);
     persistTrade({ state: STATE.CLAIMED }, 'swap_done', { trade_id: tradeId, swap_channel: swapChannel });
+    await leaveSidechannel(swapChannel);
     maybeExit();
   };
 
@@ -797,13 +805,15 @@ async function main() {
         );
 
         if (!runSwap) {
+          if (once) await leaveSidechannel(swapChannel);
           done = true;
           maybeExit();
           return;
         }
 
         // Swap state machine is run asynchronously; the process stays alive.
-        startSwap({ swapChannel, invite }).catch((err) => {
+        startSwap({ swapChannel, invite }).catch(async (err) => {
+          await leaveSidechannel(swapChannel);
           die(err?.stack || err?.message || String(err));
         });
       }

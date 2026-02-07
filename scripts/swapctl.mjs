@@ -36,6 +36,7 @@ Commands:
   price-get
   watch [--channels <a,b,c>] [--kinds <k1,k2>] [--trade-id <id>] [--pretty 0|1] [--raw 0|1]
   join --channel <name> [--invite <b64|json|@file>] [--welcome <b64|json|@file>]
+  leave --channel <name>
   open --channel <name> --via <entryChannel> [--invite ...] [--welcome ...]
   send --channel <name> (--text <msg> | --json <obj|@file>)
 
@@ -304,6 +305,13 @@ async function main() {
     const invite = parseJsonOrBase64(flags.get('invite'));
     const welcome = parseJsonOrBase64(flags.get('welcome'));
     const res = await withScBridge({ url, token }, (sc) => sc.join(channel, { invite, welcome }));
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+    return;
+  }
+
+  if (cmd === 'leave') {
+    const channel = requireFlag(flags, 'channel');
+    const res = await withScBridge({ url, token }, (sc) => sc.leave(channel));
     process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
     return;
   }

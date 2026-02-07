@@ -352,6 +352,28 @@ class ScBridge extends Feature {
           });
         return;
       }
+      case 'leave': {
+        if (!this.sidechannel) {
+          sendError('Sidechannel not ready.');
+          return;
+        }
+        const channel = String(message.channel || '').trim();
+        if (!channel) {
+          sendError('Missing channel.');
+          return;
+        }
+        this.sidechannel
+          .removeChannel(channel)
+          .then((ok) => {
+            // Leaving a non-joined channel is treated as a no-op.
+            if (client.channels) client.channels.delete(channel);
+            reply({ type: 'left', channel, ok });
+          })
+          .catch((err) => {
+            sendError(err?.message ? `Leave failed: ${err.message}` : 'Leave failed.');
+          });
+        return;
+      }
       case 'open': {
         if (!this.sidechannel) {
           sendError('Sidechannel not ready.');

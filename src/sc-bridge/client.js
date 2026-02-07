@@ -103,6 +103,10 @@ export class ScBridgeClient extends EventEmitter {
     return this._rpc('join', { channel, invite, welcome });
   }
 
+  async leave(channel) {
+    return this._rpc('leave', { channel });
+  }
+
   async open(channel, { via = null, invite = null, welcome = null } = {}) {
     return this._rpc('open', { channel, via, invite, welcome });
   }

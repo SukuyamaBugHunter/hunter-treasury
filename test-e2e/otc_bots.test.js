@@ -329,12 +329,17 @@ test('e2e: OTC maker/taker bots negotiate and join swap channel (sidechannel inv
   const swapChannel = String(joined.swap_channel || '').trim();
   assert.ok(swapChannel.startsWith('swap:'), 'swap_channel should be swap:*');
 
-  // Assert the taker peer is actually joined to the swap channel via SC-Bridge stats.
+  // Once-mode bots should not leave ephemeral swap:* channels behind on the long-running peer.
   const takerSc2 = new ScBridgeClient({ url: `ws://127.0.0.1:${takerPort}`, token: takerToken });
   await connectBridge(takerSc2, 'taker sc-bridge (post)');
-  const stats = await takerSc2.stats();
+  await retry(async () => {
+    const stats = await takerSc2.stats();
+    assert.equal(stats.type, 'stats');
+    assert.ok(Array.isArray(stats.channels));
+    assert.ok(stats.channels.includes(otcChannel), 'OTC channel should remain joined');
+    if (stats.channels.includes(swapChannel)) {
+      throw new Error(`still joined swap channel: ${swapChannel}`);
+    }
+  }, { label: 'taker left swap channel', tries: 80, delayMs: 250 });
   takerSc2.close();
-  assert.equal(stats.type, 'stats');
-  assert.ok(Array.isArray(stats.channels));
-  assert.ok(stats.channels.includes(swapChannel), `taker peer did not join ${swapChannel}. channels=${JSON.stringify(stats.channels)}`);
 });

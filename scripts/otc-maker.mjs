@@ -298,6 +298,12 @@ async function main() {
     }, delay);
   };
 
+  const leaveSidechannel = async (channel) => {
+    try {
+      await sc.leave(channel);
+    } catch (_e) {}
+  };
+
   const cancelSwap = async (ctx, reason) => {
     try {
       const cancelUnsigned = createUnsignedEnvelope({
@@ -309,6 +315,29 @@ async function main() {
       const cancelSigned = await signSwapEnvelope(sc, cancelUnsigned);
       await sc.send(ctx.swapChannel, cancelSigned);
     } catch (_e) {}
+  };
+
+  const cleanupSwap = async (ctx, { reason = null, sendCancel = false } = {}) => {
+    if (!ctx || ctx.cleanedUp) return;
+    ctx.cleanedUp = true;
+    if (ctx.resender) clearInterval(ctx.resender);
+    try {
+      swaps.delete(ctx.swapChannel);
+    } catch (_e) {}
+    if (sendCancel) {
+      // Best-effort: cancellation is only accepted before escrow creation.
+      await cancelSwap(ctx, reason || 'swap timeout');
+    }
+    persistTrade(
+      ctx.tradeId,
+      {
+        state: ctx.trade.state,
+        last_error: reason ? String(reason) : null,
+      },
+      'swap_cleanup',
+      { trade_id: ctx.tradeId, swap_channel: ctx.swapChannel, reason: reason ? String(reason) : null }
+    );
+    await leaveSidechannel(ctx.swapChannel);
   };
 
   const createAndSendTerms = async (ctx) => {
@@ -496,8 +525,9 @@ async function main() {
       try {
         if (ctx.done) return;
         if (Date.now() > ctx.deadlineMs) {
-          await cancelSwap(ctx, 'swap timeout');
-          die(`Swap timeout (swap-timeout-sec=${swapTimeoutSec})`);
+          ctx.done = true;
+          await cleanupSwap(ctx, { reason: `swap timeout (swap-timeout-sec=${swapTimeoutSec})`, sendCancel: true });
+          return;
         }
         if (ctx.trade.state === STATE.TERMS && ctx.sent.terms) {
           await sc.send(ctx.swapChannel, ctx.sent.terms);
@@ -538,9 +568,9 @@ async function main() {
         if (ctx.trade.state === STATE.CLAIMED && !ctx.done) {
           ctx.done = true;
           done = true;
-          if (ctx.resender) clearInterval(ctx.resender);
           process.stdout.write(`${JSON.stringify({ type: 'swap_done', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel })}\n`);
           persistTrade(ctx.tradeId, { state: ctx.trade.state }, 'swap_done', { trade_id: ctx.tradeId });
+          await cleanupSwap(ctx, { reason: 'swap_done' });
           maybeExit();
         }
         return;
@@ -706,6 +736,7 @@ async function main() {
         process.stdout.write(`${JSON.stringify({ type: 'swap_invite_sent', trade_id: tradeId, rfq_id: rfqId, quote_id: quoteId, swap_channel: swapChannel })}\n`);
 
         if (!runSwap) {
+          if (once) await leaveSidechannel(swapChannel);
           done = true;
           maybeExit();
           return;
