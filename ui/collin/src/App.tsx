@@ -179,10 +179,18 @@ function App() {
   }
 
   async function refreshTools() {
-    const out = await fetchJson('/v1/tools', { method: 'GET' });
-    const list = normalizeToolList(out);
-    setTools(list);
-    if (!toolName && list.length > 0) setToolName(list[0].name);
+    try {
+      const out = await fetchJson('/v1/tools', { method: 'GET' });
+      const list = normalizeToolList(out);
+      setTools(list);
+      if (!toolName && list.length > 0) setToolName(list[0].name);
+    } catch (err: any) {
+      setTools(null);
+      void appendPromptEvent(
+        { type: 'ui', ts: Date.now(), message: `tools fetch failed (promptd offline?): ${err?.message || String(err)}` },
+        { persist: false }
+      );
+    }
   }
 
   async function appendPromptEvent(evt: any, { persist = true } = {}) {

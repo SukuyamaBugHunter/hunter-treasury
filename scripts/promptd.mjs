@@ -369,53 +369,68 @@ async function main() {
         const backlog = Math.max(1, Math.min(2000, parseIntParam(u.searchParams.get('backlog'), 250)));
 
         ndjsonHeaders(res, 200);
-        req.on('close', () => {
-          try {
-            res.end();
-          } catch (_e) {}
-        });
+        const ac = new AbortController();
+        req.on('close', () => ac.abort(new Error('client_closed')));
 
-        // Ensure SC-Bridge is connected and subscribed.
-        await executor.scEnsureConnected({ timeoutMs: 10_000 });
-        if (channels.length > 0) {
-          await executor.execute('intercomswap_sc_subscribe', { channels }, { autoApprove: false, dryRun: false });
-        }
-
-        const info = executor.scLogInfo();
-        // Avoid clobbering `type` from the info object.
-        await writeNdjson(res, { type: 'sc_stream_open', info });
-
-        let cursor = since;
-        // Backlog read (bounded).
-        const first = executor.scLogRead({ sinceSeq: cursor, limit: backlog, channels: channels.length > 0 ? channels : null });
-        if (first.oldest_seq !== null && cursor < first.oldest_seq - 1) {
-          await writeNdjson(res, {
-            type: 'sc_gap',
-            requested_since: cursor,
-            oldest_seq: first.oldest_seq,
-            latest_seq: first.latest_seq,
-          });
-        }
-        for (const e of first.events) {
-          // Avoid clobbering `type` from the event object (`sidechannel_message`).
-          const { type: _t, ...rest } = e || {};
-          await writeNdjson(res, { type: 'sc_event', ...rest });
-          cursor = Math.max(cursor, e.seq);
-        }
-
-        // Tail live events.
-        while (!res.writableEnded) {
-          const woke = await executor.scLogWait({ sinceSeq: cursor, timeoutMs: 15_000 });
-          if (!woke) {
-            await writeNdjson(res, { type: 'heartbeat', ts: Date.now() });
-            continue;
+        try {
+          // Ensure SC-Bridge is connected and subscribed.
+          await executor.scEnsureConnected({ timeoutMs: 10_000 });
+          if (channels.length > 0) {
+            await executor.execute('intercomswap_sc_subscribe', { channels }, { autoApprove: false, dryRun: false });
           }
-          const slice = executor.scLogRead({ sinceSeq: cursor, limit: 500, channels: channels.length > 0 ? channels : null });
-          for (const e of slice.events) {
+
+          const info = executor.scLogInfo();
+          // Avoid clobbering `type` from the info object.
+          await writeNdjson(res, { type: 'sc_stream_open', info });
+
+          let cursor = since;
+          // Backlog read (bounded).
+          const first = executor.scLogRead({
+            sinceSeq: cursor,
+            limit: backlog,
+            channels: channels.length > 0 ? channels : null,
+          });
+          if (first.oldest_seq !== null && cursor < first.oldest_seq - 1) {
+            await writeNdjson(res, {
+              type: 'sc_gap',
+              requested_since: cursor,
+              oldest_seq: first.oldest_seq,
+              latest_seq: first.latest_seq,
+            });
+          }
+          for (const e of first.events) {
+            // Avoid clobbering `type` from the event object (`sidechannel_message`).
             const { type: _t, ...rest } = e || {};
             await writeNdjson(res, { type: 'sc_event', ...rest });
             cursor = Math.max(cursor, e.seq);
           }
+
+          // Tail live events.
+          while (!res.writableEnded && !ac.signal.aborted) {
+            const woke = await executor.scLogWait({ sinceSeq: cursor, timeoutMs: 15_000 });
+            if (!woke) {
+              await writeNdjson(res, { type: 'heartbeat', ts: Date.now() });
+              continue;
+            }
+            const slice = executor.scLogRead({
+              sinceSeq: cursor,
+              limit: 500,
+              channels: channels.length > 0 ? channels : null,
+            });
+            for (const e of slice.events) {
+              const { type: _t, ...rest } = e || {};
+              await writeNdjson(res, { type: 'sc_event', ...rest });
+              cursor = Math.max(cursor, e.seq);
+            }
+          }
+        } catch (err) {
+          try {
+            await writeNdjson(res, { type: 'error', error: err?.message ?? String(err) });
+          } catch (_e) {}
+        } finally {
+          try {
+            res.end();
+          } catch (_e) {}
         }
         return;
       }
@@ -433,6 +448,14 @@ async function main() {
 
       json(res, 404, { error: 'not_found' });
     } catch (err) {
+      // If headers are already sent (e.g. NDJSON endpoints), never try to write a second response.
+      // Best-effort close only.
+      if (res.headersSent) {
+        try {
+          res.end();
+        } catch (_e) {}
+        return;
+      }
       json(res, 400, { error: err?.message ?? String(err) });
     }
   };
