@@ -1,4 +1,7 @@
 # Logs
+.claude
+.codex
+.opencode
 logs
 *.log
 npm-debug.log*

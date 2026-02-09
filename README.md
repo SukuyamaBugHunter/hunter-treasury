@@ -746,6 +746,36 @@ npm run dev
 
 ---
 
+## Test vs Mainnet (Run As Separate Instances)
+Do **not** “toggle” one running instance between test and mainnet. Run **two separate instances** so you never mix:
+- peer stores / keys
+- promptd ports (also isolates Collin’s browser DB by origin)
+- SC‑Bridge ports + tokens
+- receipts sqlite DBs (`receipts.db`)
+- prompt audit logs (`server.audit_dir`)
+
+Recommended conventions:
+- Test rendezvous channel: `0000intercomswapbtcusdt_test`
+- Mainnet rendezvous channel: `0000intercomswapbtcusdt`
+
+Example promptd configs (all under `onchain/` so they are gitignored):
+- Test: `onchain/prompt/test/setup.json`
+  - `server.port`: `9333`
+  - `receipts.db`: `onchain/receipts/test/swap-maker.sqlite`
+  - `server.audit_dir`: `onchain/prompt/audit-test`
+  - `ln.network`: `regtest` (or `signet`)
+  - `solana.rpc_url`: local validator / devnet
+- Mainnet: `onchain/prompt/mainnet/setup.json`
+  - `server.port`: `9334`
+  - `receipts.db`: `onchain/receipts/mainnet/swap-maker.sqlite`
+  - `server.audit_dir`: `onchain/prompt/audit-mainnet`
+  - `ln.network`: `bitcoin`
+  - `solana.rpc_url`: mainnet RPC(s)
+
+Collin shows an **ENV** indicator (TEST/MAINNET/MIXED) from `intercomswap_env_get` and displays the active `receipts.db` path so you can sanity-check before moving funds.
+
+---
+
 ## Tests (Mandatory)
 
 Run all tests after changes:

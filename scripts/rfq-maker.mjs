@@ -17,6 +17,7 @@ import { KIND, ASSET, PAIR, STATE } from '../src/swap/constants.js';
 import { PAIR as PRICE_PAIR } from '../src/price/providers.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
+import { deriveIntercomswapAppHash } from '../src/swap/app.js';
 import { createInitialTrade, applySwapEnvelope } from '../src/swap/stateMachine.js';
 import { createSignedWelcome, createSignedInvite, signPayloadHex } from '../src/sidechannel/capabilities.js';
 import { normalizeClnNetwork } from '../src/ln/cln.js';
@@ -219,6 +220,9 @@ async function main() {
   const lndMacaroon = flags.get('lnd-macaroon') ? String(flags.get('lnd-macaroon')).trim() : '';
   const lndDir = flags.get('lnd-dir') ? String(flags.get('lnd-dir')).trim() : '';
 
+  const expectedProgramId = solProgramIdStr ? new PublicKey(solProgramIdStr) : LN_USDT_ESCROW_PROGRAM_ID;
+  const expectedAppHash = deriveIntercomswapAppHash({ solanaProgramId: expectedProgramId.toBase58() });
+
   const receipts = receiptsDbPath ? openTradeReceiptsStore({ dbPath: receiptsDbPath }) : null;
 
   if (runSwap) {
@@ -257,6 +261,7 @@ async function main() {
 
   const quotes = new Map(); // quote_id -> { rfq_id, trade_id, btc_sats, usdt_amount, sol_recipient, sol_mint }
   const swaps = new Map(); // swap_channel -> ctx
+  const pendingSwaps = new Map(); // swap_channel -> invitee_pubkey (dedupe concurrent QUOTE_ACCEPT handlers)
 
   const fetchBtcUsdtMedian = async () => {
     const res = await sc.priceGet();
@@ -292,15 +297,15 @@ async function main() {
   };
 
   const sol = runSwap
-	    ? (() => {
-	        const payer = readSolanaKeypair(solKeypairPath);
-	        const pool = new SolanaRpcPool({ rpcUrls: solRpcUrl, commitment: 'confirmed' });
-	        const mint = new PublicKey(solMintStr);
-	        const programId = solProgramIdStr ? new PublicKey(solProgramIdStr) : LN_USDT_ESCROW_PROGRAM_ID;
-	        const tradeFeeCollector = solTradeFeeCollectorStr ? new PublicKey(solTradeFeeCollectorStr) : null;
-	        return {
-	          payer,
-	          pool,
+		    ? (() => {
+		        const payer = readSolanaKeypair(solKeypairPath);
+		        const pool = new SolanaRpcPool({ rpcUrls: solRpcUrl, commitment: 'confirmed' });
+		        const mint = new PublicKey(solMintStr);
+		        const programId = expectedProgramId;
+		        const tradeFeeCollector = solTradeFeeCollectorStr ? new PublicKey(solTradeFeeCollectorStr) : null;
+		        return {
+		          payer,
+		          pool,
 	          mint,
 	          programId,
 	          tradeFeeCollector,
@@ -367,35 +372,40 @@ async function main() {
     await leaveSidechannel(ctx.swapChannel);
   };
 
+  const fetchFeeSnapshot = async () => {
+    if (!runSwap) {
+      return {
+        platformFeeBps: 0,
+        platformFeeCollector: null,
+        tradeFeeBps: 0,
+        tradeFeeCollector: null,
+      };
+    }
+    // Platform fee comes from the program config PDA.
+    // Trade fee comes from a trade-config PDA keyed by trade_fee_collector.
+    const cfg = await sol.pool.call((connection) => getConfigState(connection, sol.programId, 'confirmed'), {
+      label: 'maker:get-config',
+    });
+    if (!cfg) throw new Error('Solana escrow program config is not initialized (run escrowctl config-init first)');
+    const platformFeeBps = Number(cfg.feeBps || 0);
+    const platformFeeCollector = cfg.feeCollector;
+
+    const tradeFeeCollector = sol.tradeFeeCollector || cfg.feeCollector;
+    const tradeCfg = await sol.pool.call((connection) => getTradeConfigState(connection, tradeFeeCollector, sol.programId, 'confirmed'), {
+      label: 'maker:get-trade-config',
+    });
+    if (!tradeCfg) {
+      throw new Error(`Trade fee config not initialized for ${tradeFeeCollector.toBase58()}`);
+    }
+    const tradeFeeBps = Number(tradeCfg.feeBps || 0);
+    return { platformFeeBps, platformFeeCollector, tradeFeeBps, tradeFeeCollector };
+  };
+
   const createAndSendTerms = async (ctx) => {
     const nowSec = Math.floor(Date.now() / 1000);
 
-    // Fees are part of the agreed terms.
-    // Platform fee comes from the program config PDA.
-    // Trade fee comes from a trade-config PDA keyed by trade_fee_collector.
-    let platformFeeBps = 0;
-    let platformFeeCollector = null;
-    let tradeFeeBps = 0;
-    let tradeFeeCollector = null;
-    if (runSwap) {
-      const cfg = await sol.pool.call(
-        (connection) => getConfigState(connection, sol.programId, 'confirmed'),
-        { label: 'maker:get-config' }
-      );
-      if (!cfg) throw new Error('Solana escrow program config is not initialized (run escrowctl config-init first)');
-      platformFeeBps = Number(cfg.feeBps || 0);
-      platformFeeCollector = cfg.feeCollector;
-
-      tradeFeeCollector = sol.tradeFeeCollector || cfg.feeCollector;
-      const tradeCfg = await sol.pool.call(
-        (connection) => getTradeConfigState(connection, tradeFeeCollector, sol.programId, 'confirmed'),
-        { label: 'maker:get-trade-config' }
-      );
-      if (!tradeCfg) {
-        throw new Error(`Trade fee config not initialized for ${tradeFeeCollector.toBase58()}`);
-      }
-      tradeFeeBps = Number(tradeCfg.feeBps || 0);
-    }
+    // Fees are part of the agreed terms (and must match what we advertised in the QUOTE).
+    const fees = await fetchFeeSnapshot();
 
     const termsUnsigned = createUnsignedEnvelope({
       v: 1,
@@ -404,6 +414,7 @@ async function main() {
       body: {
         pair: PAIR.BTC_LN__USDT_SOL,
         direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+        app_hash: expectedAppHash,
         btc_sats: ctx.btcSats,
         usdt_amount: ctx.usdtAmount,
         usdt_decimals: solDecimals,
@@ -411,10 +422,10 @@ async function main() {
         sol_recipient: ctx.solRecipient,
         sol_refund: sol.payer.publicKey.toBase58(),
         sol_refund_after_unix: nowSec + solRefundAfterSec,
-        platform_fee_bps: platformFeeBps,
-        platform_fee_collector: platformFeeCollector ? platformFeeCollector.toBase58() : null,
-        trade_fee_bps: tradeFeeBps,
-        trade_fee_collector: tradeFeeCollector ? tradeFeeCollector.toBase58() : null,
+        platform_fee_bps: fees.platformFeeBps,
+        platform_fee_collector: fees.platformFeeCollector ? fees.platformFeeCollector.toBase58() : null,
+        trade_fee_bps: fees.tradeFeeBps,
+        trade_fee_collector: fees.tradeFeeCollector ? fees.tradeFeeCollector.toBase58() : null,
         ln_receiver_peer: makerPubkey,
         ln_payer_peer: ctx.inviteePubKey,
         terms_valid_until_unix: nowSec + termsValidSec,
@@ -597,7 +608,15 @@ async function main() {
         if (ctx.done) return;
         if (Date.now() > ctx.deadlineMs) {
           ctx.done = true;
-          await cleanupSwap(ctx, { reason: `swap timeout (swap-timeout-sec=${swapTimeoutSec})`, sendCancel: true });
+          const reason = `swap timeout (swap-timeout-sec=${swapTimeoutSec})`;
+          await cleanupSwap(ctx, { reason, sendCancel: true });
+          try {
+            clearInterval(ctx.resender);
+          } catch (_e) {}
+          ctx.resender = null;
+          swaps.delete(ctx.swapChannel);
+          // Once-mode should never hang indefinitely.
+          if (once) die(reason);
           return;
         }
         if (ctx.trade.state === STATE.TERMS && ctx.sent.terms) {
@@ -650,6 +669,11 @@ async function main() {
       if (msg.kind === KIND.RFQ) {
         const v = validateSwapEnvelope(msg);
         if (!v.ok) return;
+        const rfqAppHash = String(msg?.body?.app_hash || '').trim().toLowerCase();
+        if (rfqAppHash !== expectedAppHash) {
+          if (debug) process.stderr.write(`[maker] skip rfq app_hash mismatch trade_id=${msg.trade_id}\n`);
+          return;
+        }
         const rfqUnsigned = stripSignature(msg);
         const rfqId = hashUnsignedEnvelope(rfqUnsigned);
 
@@ -664,6 +688,59 @@ async function main() {
         const solRecipient = msg.body?.sol_recipient ? String(msg.body.sol_recipient).trim() : '';
         if (runSwap && !solRecipient) {
           if (debug) process.stderr.write(`[maker] skip rfq missing sol_recipient trade_id=${msg.trade_id} rfq_id=${rfqId}\n`);
+          return;
+        }
+
+        // Pre-filtering: only quote if we can meet the RFQ fee ceilings.
+        const fees = await fetchFeeSnapshot();
+        const rfqMaxPlatformFeeBps =
+          msg.body?.max_platform_fee_bps !== undefined && msg.body?.max_platform_fee_bps !== null
+            ? Number(msg.body.max_platform_fee_bps)
+            : null;
+        const rfqMaxTradeFeeBps =
+          msg.body?.max_trade_fee_bps !== undefined && msg.body?.max_trade_fee_bps !== null
+            ? Number(msg.body.max_trade_fee_bps)
+            : null;
+        const rfqMaxTotalFeeBps =
+          msg.body?.max_total_fee_bps !== undefined && msg.body?.max_total_fee_bps !== null
+            ? Number(msg.body.max_total_fee_bps)
+            : null;
+        if (rfqMaxPlatformFeeBps !== null && Number.isFinite(rfqMaxPlatformFeeBps) && fees.platformFeeBps > rfqMaxPlatformFeeBps) {
+          if (debug) process.stderr.write(`[maker] skip rfq fee cap: platform_fee_bps=${fees.platformFeeBps} > max=${rfqMaxPlatformFeeBps}\n`);
+          return;
+        }
+        if (rfqMaxTradeFeeBps !== null && Number.isFinite(rfqMaxTradeFeeBps) && fees.tradeFeeBps > rfqMaxTradeFeeBps) {
+          if (debug) process.stderr.write(`[maker] skip rfq fee cap: trade_fee_bps=${fees.tradeFeeBps} > max=${rfqMaxTradeFeeBps}\n`);
+          return;
+        }
+        if (
+          rfqMaxTotalFeeBps !== null &&
+          Number.isFinite(rfqMaxTotalFeeBps) &&
+          fees.platformFeeBps + fees.tradeFeeBps > rfqMaxTotalFeeBps
+        ) {
+          if (debug) {
+            process.stderr.write(
+              `[maker] skip rfq fee cap: total_fee_bps=${fees.platformFeeBps + fees.tradeFeeBps} > max=${rfqMaxTotalFeeBps}\n`
+            );
+          }
+          return;
+        }
+
+        // Pre-filtering: only quote if we can meet the RFQ refund-window preference (seconds).
+        const rfqMinRefundWindowSec =
+          msg.body?.min_sol_refund_window_sec !== undefined && msg.body?.min_sol_refund_window_sec !== null
+            ? Number(msg.body.min_sol_refund_window_sec)
+            : null;
+        const rfqMaxRefundWindowSec =
+          msg.body?.max_sol_refund_window_sec !== undefined && msg.body?.max_sol_refund_window_sec !== null
+            ? Number(msg.body.max_sol_refund_window_sec)
+            : null;
+        if (rfqMinRefundWindowSec !== null && Number.isFinite(rfqMinRefundWindowSec) && solRefundAfterSec < rfqMinRefundWindowSec) {
+          if (debug) process.stderr.write(`[maker] skip rfq refund window: want>=${rfqMinRefundWindowSec}s have=${solRefundAfterSec}s\n`);
+          return;
+        }
+        if (rfqMaxRefundWindowSec !== null && Number.isFinite(rfqMaxRefundWindowSec) && solRefundAfterSec > rfqMaxRefundWindowSec) {
+          if (debug) process.stderr.write(`[maker] skip rfq refund window: want<=${rfqMaxRefundWindowSec}s have=${solRefundAfterSec}s\n`);
           return;
         }
 
@@ -726,8 +803,15 @@ async function main() {
             rfq_id: rfqId,
             pair: PAIR.BTC_LN__USDT_SOL,
             direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+            app_hash: expectedAppHash,
             btc_sats: msg.body.btc_sats,
             usdt_amount: quoteUsdtAmount,
+            // Pre-filtering: fee preview (binding fees are still in TERMS).
+            platform_fee_bps: fees.platformFeeBps,
+            platform_fee_collector: fees.platformFeeCollector ? fees.platformFeeCollector.toBase58() : null,
+            trade_fee_bps: fees.tradeFeeBps,
+            trade_fee_collector: fees.tradeFeeCollector ? fees.tradeFeeCollector.toBase58() : null,
+            sol_refund_window_sec: solRefundAfterSec,
             ...(runSwap ? { sol_mint: sol.mint.toBase58(), sol_recipient: solRecipient } : {}),
             valid_until_unix: nowSec + quoteValidSec,
           },
@@ -742,6 +826,11 @@ async function main() {
           trade_id: String(msg.trade_id),
           btc_sats: msg.body.btc_sats,
           usdt_amount: quoteUsdtAmount,
+          platform_fee_bps: fees.platformFeeBps,
+          platform_fee_collector: fees.platformFeeCollector ? fees.platformFeeCollector.toBase58() : null,
+          trade_fee_bps: fees.tradeFeeBps,
+          trade_fee_collector: fees.tradeFeeCollector ? fees.tradeFeeCollector.toBase58() : null,
+          sol_refund_window_sec: solRefundAfterSec,
           sol_recipient: solRecipient,
           sol_mint: runSwap ? sol.mint.toBase58() : (msg.body?.sol_mint ? String(msg.body.sol_mint).trim() : ''),
         });
@@ -768,10 +857,17 @@ async function main() {
         // If a swap is already in-flight for this trade, treat quote_accept as a retry signal and re-send
         // a fresh swap invite (do not reset the swap state machine).
         const existing = swaps.get(swapChannel);
+        const pendingInvitee = pendingSwaps.get(swapChannel);
+        const isRetry = Boolean(existing || pendingInvitee);
         if (existing) {
           if (String(existing.inviteePubKey || '').trim().toLowerCase() !== inviteePubKey) return;
-          // Note: we intentionally create a new invite (fresh nonce) so the taker can join even if they
-          // missed the first invite.
+        }
+        if (pendingInvitee) {
+          if (String(pendingInvitee || '').trim().toLowerCase() !== inviteePubKey) return;
+        }
+        if (!isRetry) {
+          // Mark early to dedupe concurrent QUOTE_ACCEPT handlers (node event handlers are not awaited).
+          pendingSwaps.set(swapChannel, inviteePubKey);
         }
 
         // Build welcome + invite signed by this peer (local keypair signing).
@@ -808,62 +904,69 @@ async function main() {
           },
         });
         const swapInviteSigned = signSwapEnvelope(swapInviteUnsigned, signing);
-        ensureOk(await sc.send(rfqChannel, swapInviteSigned), 'send swap_invite');
-        // If this was a retry for an existing swap, just re-send the invite and return.
-        if (existing) return;
-
-        ensureOk(await sc.join(swapChannel, { welcome }), `join ${swapChannel}`);
-        ensureOk(await sc.subscribe([swapChannel]), `subscribe ${swapChannel}`);
-
-        process.stdout.write(`${JSON.stringify({ type: 'swap_invite_sent', trade_id: tradeId, rfq_id: rfqId, quote_id: quoteId, swap_channel: swapChannel })}\n`);
-
-        if (!runSwap) {
-          if (once) await leaveSidechannel(swapChannel);
-          done = true;
-          maybeExit();
+        // If this was a retry (existing swap or swap setup in-flight), just re-send the invite and return.
+        if (isRetry) {
+          ensureOk(await sc.send(rfqChannel, swapInviteSigned), 'send swap_invite');
           return;
         }
 
-        const ctx = {
-          tradeId,
-          rfqId,
-          quoteId,
-          swapChannel,
-          inviteePubKey,
-          btcSats: Number(known.btc_sats),
-          usdtAmount: String(known.usdt_amount),
-          solRecipient: String(known.sol_recipient),
-          trade: createInitialTrade(tradeId),
-          sent: {},
-          startedSettlement: false,
-          paymentHashHex: null,
-          done: false,
-          deadlineMs: Date.now() + swapTimeoutSec * 1000,
-          resender: null,
-        };
-        swaps.set(swapChannel, ctx);
+        try {
+          ensureOk(await sc.send(rfqChannel, swapInviteSigned), 'send swap_invite');
+          ensureOk(await sc.join(swapChannel, { welcome }), `join ${swapChannel}`);
+          ensureOk(await sc.subscribe([swapChannel]), `subscribe ${swapChannel}`);
 
-        // Begin swap: send terms and start the resend loop.
-        await createAndSendTerms(ctx);
-        startSwapResender(ctx);
+          process.stdout.write(`${JSON.stringify({ type: 'swap_invite_sent', trade_id: tradeId, rfq_id: rfqId, quote_id: quoteId, swap_channel: swapChannel })}\n`);
 
-        persistTrade(
-          tradeId,
-          {
-            role: 'maker',
-            rfq_channel: rfqChannel,
-            swap_channel: swapChannel,
-            maker_peer: makerPubkey,
-            taker_peer: inviteePubKey,
-            btc_sats: ctx.btcSats,
-            usdt_amount: ctx.usdtAmount,
-            sol_mint: runSwap ? sol.mint.toBase58() : null,
-            sol_recipient: ctx.solRecipient,
-            state: ctx.trade.state,
-          },
-          'swap_started',
-          { trade_id: tradeId, swap_channel: swapChannel }
-        );
+          if (!runSwap) {
+            if (once) await leaveSidechannel(swapChannel);
+            done = true;
+            maybeExit();
+            return;
+          }
+
+          const ctx = {
+            tradeId,
+            rfqId,
+            quoteId,
+            swapChannel,
+            inviteePubKey,
+            btcSats: Number(known.btc_sats),
+            usdtAmount: String(known.usdt_amount),
+            solRecipient: String(known.sol_recipient),
+            trade: createInitialTrade(tradeId),
+            sent: {},
+            startedSettlement: false,
+            paymentHashHex: null,
+            done: false,
+            deadlineMs: Date.now() + swapTimeoutSec * 1000,
+            resender: null,
+          };
+          swaps.set(swapChannel, ctx);
+
+          // Begin swap: send terms and start the resend loop.
+          await createAndSendTerms(ctx);
+          startSwapResender(ctx);
+
+          persistTrade(
+            tradeId,
+            {
+              role: 'maker',
+              rfq_channel: rfqChannel,
+              swap_channel: swapChannel,
+              maker_peer: makerPubkey,
+              taker_peer: inviteePubKey,
+              btc_sats: ctx.btcSats,
+              usdt_amount: ctx.usdtAmount,
+              sol_mint: runSwap ? sol.mint.toBase58() : null,
+              sol_recipient: ctx.solRecipient,
+              state: ctx.trade.state,
+            },
+            'swap_started',
+            { trade_id: tradeId, swap_channel: swapChannel }
+          );
+        } finally {
+          pendingSwaps.delete(swapChannel);
+        }
       }
     } catch (err) {
       if (debug) process.stderr.write(`[maker] error: ${err?.message ?? String(err)}\n`);

@@ -149,7 +149,6 @@ async function pickFreePorts(n) {
 
 async function startSolanaValidator({ soPath, ledgerSuffix }) {
   const ledgerPath = path.join(repoRoot, `onchain/solana/ledger-e2e-${ledgerSuffix}`);
-  const url = 'https://api.devnet.solana.com';
   const args = [
     '--reset',
     '--ledger',
@@ -160,12 +159,6 @@ async function startSolanaValidator({ soPath, ledgerSuffix }) {
     '8899',
     '--faucet-port',
     '9900',
-    '--url',
-    url,
-    '--clone',
-    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-    '--clone',
-    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
     '--bpf-program',
     LN_USDT_ESCROW_PROGRAM_ID.toBase58(),
     soPath,
@@ -337,7 +330,7 @@ async function connectBridge(sc, label) {
         throw err;
       }
     },
-    { label, tries: 80, delayMs: 250 }
+    { label, tries: 160, delayMs: 250 }
   );
 }
 
@@ -703,6 +696,14 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   await bobSc.subscribe([rfqChannel, swapChannel]);
   await eveSc.subscribe([swapChannel]);
 
+  // Explicitly join+flush the RFQ channel via SC-Bridge.
+  // Sidechannels are preconfigured via --sidechannels, but in degraded environments a second join()
+  // can help recover discovery/flush timing edges (and avoids relying on external bootstrap nodes).
+  const aliceJoinRfq = await aliceSc.join(rfqChannel);
+  assert.equal(aliceJoinRfq.type, 'joined');
+  const bobJoinRfq = await bobSc.join(rfqChannel);
+  assert.equal(bobJoinRfq.type, 'joined');
+
   // Collect messages early; we use RFQ pings to ensure peers are connected before the swap.
   const seen = {
     alice: { rfq: [], swap: [] },
@@ -932,11 +933,20 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
     .filter((m) => m && typeof m === 'object' && m.trade_id === tradeId)
     .sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
 
-  for (const msg of allSwap) {
-    const resA = applySwapEnvelope(aliceTrade, msg);
-    if (resA.ok) aliceTrade = resA.trade;
-    const resB = applySwapEnvelope(bobTrade, msg);
-    if (resB.ok) bobTrade = resB.trade;
+  // Apply in multiple passes to tolerate cross-peer clock skew:
+  // `ts` ordering is not reliable across processes, but the state machine can accept out-of-order
+  // messages once prerequisites are present.
+  for (let iter = 0; iter < 20; iter += 1) {
+    const beforeA = aliceTrade.state;
+    const beforeB = bobTrade.state;
+    for (const msg of allSwap) {
+      const resA = applySwapEnvelope(aliceTrade, msg);
+      if (resA.ok) aliceTrade = resA.trade;
+      const resB = applySwapEnvelope(bobTrade, msg);
+      if (resB.ok) bobTrade = resB.trade;
+    }
+    if (aliceTrade.state === STATE.CLAIMED && bobTrade.state === STATE.CLAIMED) break;
+    if (aliceTrade.state === beforeA && bobTrade.state === beforeB) break;
   }
   assert.equal(aliceTrade.state, STATE.CLAIMED);
   assert.equal(bobTrade.state, STATE.CLAIMED);

@@ -19,6 +19,7 @@ import { KIND, ASSET, PAIR, STATE } from '../src/swap/constants.js';
 import { PAIR as PRICE_PAIR } from '../src/price/providers.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
+import { deriveIntercomswapAppHash } from '../src/swap/app.js';
 import { createInitialTrade, applySwapEnvelope } from '../src/swap/stateMachine.js';
 import { verifySwapPrePayOnchain } from '../src/swap/verify.js';
 import { normalizeClnNetwork } from '../src/ln/cln.js';
@@ -177,7 +178,7 @@ async function main() {
   const minSolRefundWindowSec = parseIntFlag(
     flags.get('min-solana-refund-window-sec'),
     'min-solana-refund-window-sec',
-    3600
+    72 * 3600
   );
   const maxSolRefundWindowSec = parseIntFlag(
     flags.get('max-solana-refund-window-sec'),
@@ -213,6 +214,9 @@ async function main() {
   const lndTlsCert = flags.get('lnd-tlscert') ? String(flags.get('lnd-tlscert')).trim() : '';
   const lndMacaroon = flags.get('lnd-macaroon') ? String(flags.get('lnd-macaroon')).trim() : '';
   const lndDir = flags.get('lnd-dir') ? String(flags.get('lnd-dir')).trim() : '';
+
+  const expectedProgramId = solProgramIdStr ? new PublicKey(solProgramIdStr) : LN_USDT_ESCROW_PROGRAM_ID;
+  const expectedAppHash = deriveIntercomswapAppHash({ solanaProgramId: expectedProgramId.toBase58() });
 
   const receipts = receiptsDbPath ? openTradeReceiptsStore({ dbPath: receiptsDbPath }) : null;
 
@@ -287,7 +291,6 @@ async function main() {
     ? (() => {
         const payer = readSolanaKeypair(solKeypairPath);
         const pool = new SolanaRpcPool({ rpcUrls: solRpcUrl, commitment: 'confirmed' });
-        const expectedProgramId = solProgramIdStr ? new PublicKey(solProgramIdStr) : LN_USDT_ESCROW_PROGRAM_ID;
         return {
           payer,
           pool,
@@ -306,8 +309,17 @@ async function main() {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: expectedAppHash,
       btc_sats: btcSats,
       usdt_amount: usdtAmount,
+      // Pre-filtering: tell makers our fee ceilings up front (binding fees are still in TERMS).
+      max_platform_fee_bps: maxPlatformFeeBps,
+      max_trade_fee_bps: maxTradeFeeBps,
+      max_total_fee_bps: maxTotalFeeBps,
+      // Pre-filtering: request a Solana refund/claim window range (seconds).
+      // Maker will advertise its offered value in QUOTE.sol_refund_window_sec.
+      min_sol_refund_window_sec: minSolRefundWindowSec,
+      max_sol_refund_window_sec: maxSolRefundWindowSec,
       ...(runSwap ? { sol_recipient: sol.payer.publicKey.toBase58() } : {}),
       ...(runSwap && solMintStr ? { sol_mint: solMintStr } : {}),
       valid_until_unix: nowSec + rfqValidSec,
@@ -337,6 +349,7 @@ async function main() {
 
   let chosen = null; // { rfq_id, quote_id, quote }
   let joined = false;
+  let joinSwapInFlight = false;
   let done = false;
   let swapCtx = null; // { swapChannel, invite, trade, waiters, sent }
 
@@ -492,6 +505,11 @@ async function main() {
       label: 'TERMS',
     });
 
+    const termsAppHash = String(termsMsg?.body?.app_hash || '').trim().toLowerCase();
+    if (termsAppHash !== expectedAppHash) {
+      throw new Error('terms.app_hash mismatch (wrong app/program for this channel)');
+    }
+
     // Guardrail: bind swap counterparty identity to the quote we accepted.
     const quoteMaker = String(chosen?.quote?.signer || '').trim().toLowerCase();
     const gotTermsSigner = String(termsMsg.signer || '').trim().toLowerCase();
@@ -524,13 +542,20 @@ async function main() {
       if (!Number.isFinite(refundAfterUnix) || refundAfterUnix <= 0) {
         throw new Error('terms.sol_refund_after_unix missing/invalid');
       }
-      const windowSec = refundAfterUnix - nowSec;
-      if (windowSec < minSolRefundWindowSec) {
+      const termsTsSec = Math.floor(Number(termsMsg?.ts || 0) / 1000) || nowSec;
+      const windowSec = refundAfterUnix - termsTsSec;
+      // Allow small clock skew / rounding differences between unix-sec and ms timestamps.
+      const slackSec = 120;
+      if (windowSec + slackSec < minSolRefundWindowSec) {
         throw new Error(
           `terms.sol_refund_after_unix too soon (window_sec=${windowSec} min=${minSolRefundWindowSec})`
         );
       }
-      if (maxSolRefundWindowSec !== null && Number.isFinite(maxSolRefundWindowSec) && windowSec > maxSolRefundWindowSec) {
+      if (
+        maxSolRefundWindowSec !== null &&
+        Number.isFinite(maxSolRefundWindowSec) &&
+        windowSec - slackSec > maxSolRefundWindowSec
+      ) {
         throw new Error(
           `terms.sol_refund_after_unix too far (window_sec=${windowSec} max=${maxSolRefundWindowSec})`
         );
@@ -553,6 +578,48 @@ async function main() {
         if (String(termsMsg.body?.sol_mint) !== String(chosen.quote.body?.sol_mint)) {
           throw new Error(
             `terms.sol_mint mismatch vs quote (terms=${termsMsg.body?.sol_mint} quote=${chosen.quote.body?.sol_mint})`
+          );
+        }
+      }
+      if (chosen.quote.body?.sol_refund_window_sec !== undefined && chosen.quote.body?.sol_refund_window_sec !== null) {
+        const quoteWindow = Number(chosen.quote.body?.sol_refund_window_sec);
+        const refundAfterUnix = Number(termsMsg.body?.sol_refund_after_unix);
+        const termsTsSec = Math.floor(Number(termsMsg?.ts || 0) / 1000);
+        if (Number.isFinite(quoteWindow) && quoteWindow > 0 && Number.isFinite(refundAfterUnix) && refundAfterUnix > 0 && termsTsSec > 0) {
+          const termsWindow = refundAfterUnix - termsTsSec;
+          // Allow small clock skew / rounding differences.
+          if (Math.abs(termsWindow - quoteWindow) > 120) {
+            throw new Error(
+              `terms.sol_refund_after_unix mismatch vs quote window (terms_window_sec=${termsWindow} quote_window_sec=${quoteWindow})`
+            );
+          }
+        }
+      }
+      if (chosen.quote.body?.platform_fee_bps !== undefined && chosen.quote.body?.platform_fee_bps !== null) {
+        if (Number(termsMsg.body?.platform_fee_bps) !== Number(chosen.quote.body?.platform_fee_bps)) {
+          throw new Error(
+            `terms.platform_fee_bps mismatch vs quote (terms=${termsMsg.body?.platform_fee_bps} quote=${chosen.quote.body?.platform_fee_bps})`
+          );
+        }
+      }
+      if (chosen.quote.body?.trade_fee_bps !== undefined && chosen.quote.body?.trade_fee_bps !== null) {
+        if (Number(termsMsg.body?.trade_fee_bps) !== Number(chosen.quote.body?.trade_fee_bps)) {
+          throw new Error(
+            `terms.trade_fee_bps mismatch vs quote (terms=${termsMsg.body?.trade_fee_bps} quote=${chosen.quote.body?.trade_fee_bps})`
+          );
+        }
+      }
+      if (chosen.quote.body?.trade_fee_collector) {
+        if (String(termsMsg.body?.trade_fee_collector) !== String(chosen.quote.body?.trade_fee_collector)) {
+          throw new Error(
+            `terms.trade_fee_collector mismatch vs quote (terms=${termsMsg.body?.trade_fee_collector} quote=${chosen.quote.body?.trade_fee_collector})`
+          );
+        }
+      }
+      if (chosen.quote.body?.platform_fee_collector && termsMsg.body?.platform_fee_collector) {
+        if (String(termsMsg.body?.platform_fee_collector) !== String(chosen.quote.body?.platform_fee_collector)) {
+          throw new Error(
+            `terms.platform_fee_collector mismatch vs quote (terms=${termsMsg.body?.platform_fee_collector} quote=${chosen.quote.body?.platform_fee_collector})`
           );
         }
       }
@@ -844,6 +911,8 @@ async function main() {
         if (String(msg.trade_id) !== tradeId) return;
         const v = validateSwapEnvelope(msg);
         if (!v.ok) return;
+        const quoteAppHash = String(msg?.body?.app_hash || '').trim().toLowerCase();
+        if (quoteAppHash !== expectedAppHash) return;
         const quoteUnsigned = stripSignature(msg);
         const quoteId = hashUnsignedEnvelope(quoteUnsigned);
         const rfqIdGot = String(msg.body?.rfq_id || '').trim().toLowerCase();
@@ -853,6 +922,23 @@ async function main() {
         const now = Math.floor(Date.now() / 1000);
         if (Number.isFinite(validUntil) && validUntil <= now) {
           if (debug) process.stderr.write(`[taker] ignore expired quote quote_id=${quoteId}\n`);
+          return;
+        }
+
+        // Pre-filtering: require explicit fee preview in QUOTE so we can reject before joining swap:<id>.
+        const quotePlatformFeeBps = Number(msg.body?.platform_fee_bps);
+        const quoteTradeFeeBps = Number(msg.body?.trade_fee_bps);
+        if (!Number.isFinite(quotePlatformFeeBps) || quotePlatformFeeBps < 0) return;
+        if (!Number.isFinite(quoteTradeFeeBps) || quoteTradeFeeBps < 0) return;
+        if (quotePlatformFeeBps > maxPlatformFeeBps) return;
+        if (quoteTradeFeeBps > maxTradeFeeBps) return;
+        if (quotePlatformFeeBps + quoteTradeFeeBps > maxTotalFeeBps) return;
+
+        // Pre-filtering: require explicit refund/claim window advertised in QUOTE (seconds).
+        const quoteRefundWindowSec = Number(msg.body?.sol_refund_window_sec);
+        if (!Number.isFinite(quoteRefundWindowSec) || quoteRefundWindowSec <= 0) return;
+        if (quoteRefundWindowSec < minSolRefundWindowSec) return;
+        if (maxSolRefundWindowSec !== null && Number.isFinite(maxSolRefundWindowSec) && quoteRefundWindowSec > maxSolRefundWindowSec) {
           return;
         }
 
@@ -932,7 +1018,17 @@ async function main() {
         const invitee = String(invite?.payload?.inviteePubKey || '').trim().toLowerCase();
         if (invitee && invitee !== takerPubkey) return;
 
-        ensureOk(await sc.join(swapChannel, { invite, welcome }), `join ${swapChannel}`);
+        // Dedupe: SWAP_INVITE can be re-broadcast. Never restart the swap state machine.
+        if (joined || swapCtx || joinSwapInFlight) {
+          if (debug) process.stderr.write(`[taker] ignore duplicate swap_invite trade_id=${tradeId}\n`);
+          return;
+        }
+        joinSwapInFlight = true;
+        try {
+          ensureOk(await sc.join(swapChannel, { invite, welcome }), `join ${swapChannel}`);
+        } finally {
+          joinSwapInFlight = false;
+        }
         joined = true;
         stopTimers();
         clearInterval(enforceTimeout);

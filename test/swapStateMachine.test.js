@@ -6,8 +6,11 @@ import PeerWallet from 'trac-wallet';
 
 import { createUnsignedEnvelope, encodeEnvelopeForSigning, attachSignature } from '../src/protocol/signedMessage.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
+import { deriveIntercomswapAppHash } from '../src/swap/app.js';
 import { applySwapEnvelope, createInitialTrade } from '../src/swap/stateMachine.js';
 import { ASSET, KIND, PAIR, STATE } from '../src/swap/constants.js';
+
+const APP_HASH = deriveIntercomswapAppHash({ solanaProgramId: '11111111111111111111111111111111' });
 
 async function newWallet() {
   const w = new PeerWallet();
@@ -40,6 +43,7 @@ test('swap state machine: happy path', async () => {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 5000,
       usdt_amount: '2500000',
       usdt_decimals: 6,
@@ -171,6 +175,7 @@ test('swap state machine: reject accept with wrong terms_hash', async () => {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',
@@ -221,6 +226,7 @@ test('swap state machine: reject invoice from wrong signer', async () => {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',
@@ -285,6 +291,7 @@ test('swap state machine: reject accept after terms_valid_until_unix', async () 
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 100,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',
@@ -337,6 +344,7 @@ test('swap state machine: accept idempotent replay after accepted', async () => 
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 10,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',
@@ -399,6 +407,7 @@ test('swap state machine: reject escrow refund_after earlier than terms', async 
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',
@@ -491,6 +500,7 @@ test('swap state machine: reject escrow payment_hash mismatch vs invoice', async
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',
@@ -582,6 +592,7 @@ test('swap state machine: invoice idempotent replay in escrow state', async () =
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',
@@ -679,6 +690,7 @@ test('swap state machine: reject terms update after accept', async () => {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1,
       usdt_amount: '1',
       sol_mint: 'So11111111111111111111111111111111111111112',

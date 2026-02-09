@@ -16,10 +16,14 @@ import { createUnsignedEnvelope, attachSignature, signUnsignedEnvelopeHex } from
 import { createSignedWelcome, signPayloadHex, toB64Json } from '../src/sidechannel/capabilities.js';
 import { KIND, PAIR, ASSET } from '../src/swap/constants.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
+import { deriveIntercomswapAppHash } from '../src/swap/app.js';
+import { LN_USDT_ESCROW_PROGRAM_ID } from '../src/solana/lnUsdtEscrowClient.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
+
+const APP_HASH = deriveIntercomswapAppHash({ solanaProgramId: LN_USDT_ESCROW_PROGRAM_ID.toBase58() });
 
 async function retry(fn, { tries = 80, delayMs = 250, label = 'retry' } = {}) {
   let lastErr = null;
@@ -114,9 +118,23 @@ function spawnPeer(args, { label }) {
 }
 
 async function killProc(proc) {
-  if (!proc || proc.killed) return;
-  proc.kill('SIGINT');
-  await new Promise((r) => proc.once('exit', r));
+  if (!proc) return;
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill('SIGINT');
+  } catch (_e) {}
+  await Promise.race([
+    new Promise((r) => proc.once('exit', r)),
+    new Promise((r) => setTimeout(r, 5000)),
+  ]);
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill('SIGKILL');
+  } catch (_e) {}
+  await Promise.race([
+    new Promise((r) => proc.once('exit', r)),
+    new Promise((r) => setTimeout(r, 5000)),
+  ]);
 }
 
 function spawnBot(args, { label }) {
@@ -255,6 +273,18 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   const takerToken = `token-taker-${runId}`;
   const [makerPort, takerPort] = await pickFreePorts(2);
 
+  // Always close client resources, even if the connectivity barrier fails.
+  let makerSc = null;
+  let takerSc = null;
+  t.after(() => {
+    try {
+      makerSc?.close?.();
+    } catch (_e) {}
+    try {
+      takerSc?.close?.();
+    } catch (_e) {}
+  });
+
   const makerPeer = spawnPeer(
     [
       '--peer-store-name',
@@ -357,8 +387,8 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   });
 
   // Wait until both SC-Bridge servers are reachable.
-  const makerSc = new ScBridgeClient({ url: `ws://127.0.0.1:${makerPort}`, token: makerToken });
-  const takerSc = new ScBridgeClient({ url: `ws://127.0.0.1:${takerPort}`, token: takerToken });
+  makerSc = new ScBridgeClient({ url: `ws://127.0.0.1:${makerPort}`, token: makerToken });
+  takerSc = new ScBridgeClient({ url: `ws://127.0.0.1:${takerPort}`, token: takerToken });
   await connectBridge(makerSc, 'maker sc-bridge');
   await connectBridge(takerSc, 'taker sc-bridge');
 
@@ -366,70 +396,99 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   await retry(async () => {
     const s = await makerSc.stats();
     if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('maker sidechannel not started');
-  }, { label: 'maker sidechannel started', tries: 200, delayMs: 250 });
+  }, { label: 'maker sidechannel started', tries: 400, delayMs: 250 });
   await retry(async () => {
     const s = await takerSc.stats();
     if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('taker sidechannel not started');
-  }, { label: 'taker sidechannel started', tries: 200, delayMs: 250 });
+  }, { label: 'taker sidechannel started', tries: 400, delayMs: 250 });
 
   // Connectivity barrier: ensure peers can exchange messages in the RFQ channel before starting bots.
   ensureOk(await makerSc.join(rfqChannel), `join ${rfqChannel} (maker)`);
   ensureOk(await takerSc.join(rfqChannel), `join ${rfqChannel} (taker)`);
   ensureOk(await makerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (maker)`);
   ensureOk(await takerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (taker)`);
+  // SC messages are not buffered; if peers haven't connected yet, a one-shot ping can be dropped.
+  // Resend periodically until we see it on the other side.
   ensureOk(await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId }), 'send ping maker->taker');
+  let pingStop = false;
+  const pingResender = setInterval(async () => {
+    if (pingStop) return;
+    try {
+      await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId });
+    } catch (_e) {}
+  }, 250);
+  t.after(() => clearInterval(pingResender));
   await waitForSidechannel(takerSc, {
     channel: rfqChannel,
     pred: (m) => m?.type === 'e2e_ping' && m?.from === 'maker' && m?.runId === runId,
     timeoutMs: 20_000,
     label: 'ping maker->taker',
   });
+  pingStop = true;
+  clearInterval(pingResender);
+
   ensureOk(await takerSc.send(rfqChannel, { type: 'e2e_ping', from: 'taker', runId }), 'send ping taker->maker');
+  let ping2Stop = false;
+  const ping2Resender = setInterval(async () => {
+    if (ping2Stop) return;
+    try {
+      await takerSc.send(rfqChannel, { type: 'e2e_ping', from: 'taker', runId });
+    } catch (_e) {}
+  }, 250);
+  t.after(() => clearInterval(ping2Resender));
   await waitForSidechannel(makerSc, {
     channel: rfqChannel,
     pred: (m) => m?.type === 'e2e_ping' && m?.from === 'taker' && m?.runId === runId,
     timeoutMs: 20_000,
     label: 'ping taker->maker',
   });
+  ping2Stop = true;
+  clearInterval(ping2Resender);
 
   makerSc.close();
   takerSc.close();
 
-	  const makerBot = spawnBot(
-	    [
-	      'scripts/rfq-maker.mjs',
-	      '--url',
-	      `ws://127.0.0.1:${makerPort}`,
-	      '--token',
-	      makerToken,
-	      '--peer-keypair',
-	      makerKeys.keyPairPath,
-	      '--rfq-channel',
-	      rfqChannel,
-	      '--once',
-	      '1',
+  const makerBot = spawnBot(
+    [
+      'scripts/rfq-maker.mjs',
+      '--url',
+      `ws://127.0.0.1:${makerPort}`,
+      '--token',
+      makerToken,
+      '--peer-keypair',
+      makerKeys.keyPairPath,
+      '--rfq-channel',
+      rfqChannel,
+      '--once',
+      '1',
     ],
     { label: 'maker-bot' }
   );
 
-	  const takerBot = spawnBot(
-	    [
-	      'scripts/rfq-taker.mjs',
-	      '--url',
-	      `ws://127.0.0.1:${takerPort}`,
-	      '--token',
-	      takerToken,
-	      '--peer-keypair',
-	      takerKeys.keyPairPath,
-	      '--rfq-channel',
-	      rfqChannel,
-	      '--once',
-	      '1',
+  const takerBot = spawnBot(
+    [
+      'scripts/rfq-taker.mjs',
+      '--url',
+      `ws://127.0.0.1:${takerPort}`,
+      '--token',
+      takerToken,
+      '--peer-keypair',
+      takerKeys.keyPairPath,
+      '--rfq-channel',
+      rfqChannel,
+      '--once',
+      '1',
       '--timeout-sec',
       '30',
     ],
     { label: 'taker-bot' }
   );
+
+  // If the test fails before bots exit, ensure they don't keep the event loop alive.
+  t.after(async () => {
+    await killProc(takerBot?.proc);
+    await killProc(makerBot?.proc);
+  });
 
   const [makerRes, takerRes] = await Promise.all([makerBot.wait(), takerBot.wait()]);
 
@@ -482,7 +541,7 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
 
   const makerKeys = await writePeerKeypair({ storesDir, storeName: makerStore });
   const takerKeys = await writePeerKeypair({ storesDir, storeName: takerStore });
-	  const attackerKeys = await writePeerKeypair({ storesDir, storeName: attackerStore });
+  const attackerKeys = await writePeerKeypair({ storesDir, storeName: attackerStore });
 
   const signMakerHex = (payload) => signPayloadHex(payload, makerKeys.secHex);
   const rfqWelcome = createSignedWelcome(
@@ -663,68 +722,111 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
   await retry(async () => {
     const s = await makerSc.stats();
     if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('maker sidechannel not started');
-  }, { label: 'maker sidechannel started (hijack)', tries: 200, delayMs: 250 });
+  }, { label: 'maker sidechannel started (hijack)', tries: 400, delayMs: 250 });
   await retry(async () => {
     const s = await takerSc.stats();
     if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('taker sidechannel not started');
-  }, { label: 'taker sidechannel started (hijack)', tries: 200, delayMs: 250 });
+  }, { label: 'taker sidechannel started (hijack)', tries: 400, delayMs: 250 });
   await retry(async () => {
     const s = await attackerSc.stats();
     if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('attacker sidechannel not started');
-  }, { label: 'attacker sidechannel started (hijack)', tries: 200, delayMs: 250 });
+  }, { label: 'attacker sidechannel started (hijack)', tries: 400, delayMs: 250 });
 
   // Connectivity barrier: ensure maker/taker can exchange messages before driving the hijack scenario.
   ensureOk(await makerSc.join(rfqChannel), `join ${rfqChannel} (maker)`);
   ensureOk(await takerSc.join(rfqChannel), `join ${rfqChannel} (taker)`);
   ensureOk(await makerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (maker)`);
   ensureOk(await takerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (taker)`);
-  ensureOk(await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId }), 'send ping maker->taker (hijack)');
+  // SC messages are not buffered; if the peers haven't connected yet, a one-shot ping can be dropped.
+  // Resend periodically until we see it on the other side.
+  ensureOk(
+    await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId }),
+    'send ping maker->taker (hijack initial)'
+  );
+  let pingStop = false;
+  const pingResender = setInterval(async () => {
+    if (pingStop) return;
+    try {
+      await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId });
+    } catch (_e) {}
+  }, 250);
+  t.after(() => clearInterval(pingResender));
   await waitForSidechannel(takerSc, {
     channel: rfqChannel,
     pred: (m) => m?.type === 'e2e_ping' && m?.from === 'maker' && m?.runId === runId,
     timeoutMs: 20_000,
     label: 'ping maker->taker (hijack)',
   });
+  pingStop = true;
+  clearInterval(pingResender);
 
   ensureOk(await takerSc.join(rfqChannel), `join ${rfqChannel} (taker)`);
   ensureOk(await attackerSc.join(rfqChannel), `join ${rfqChannel} (attacker)`);
   ensureOk(await takerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (taker)`);
 
-	  const makerBot = spawnBot(
-	    [
-	      'scripts/rfq-maker.mjs',
-	      '--url',
-	      `ws://127.0.0.1:${makerPort}`,
-	      '--token',
-	      makerToken,
-	      '--peer-keypair',
-	      makerKeys.keyPairPath,
-	      '--rfq-channel',
-	      rfqChannel,
-	      '--price-guard',
-	      '0',
+  const makerBot = spawnBot(
+    [
+      'scripts/rfq-maker.mjs',
+      '--url',
+      `ws://127.0.0.1:${makerPort}`,
+      '--token',
+      makerToken,
+      '--peer-keypair',
+      makerKeys.keyPairPath,
+      '--rfq-channel',
+      rfqChannel,
+      '--price-guard',
+      '0',
       '--once',
       '1',
     ],
     { label: 'maker-bot-hijack' }
   );
 
+  // If the test fails mid-way, ensure the once-mode maker-bot doesn't keep the event loop alive.
+  t.after(async () => {
+    await killProc(makerBot?.proc);
+  });
+
+  // Ensure maker-bot is fully connected/subscribed before we expect QUOTE responses.
+  await retry(
+    async () => {
+      if (makerBot.proc.exitCode !== null) {
+        const tail = makerBot.tail();
+        throw new Error(`maker-bot exited early. stdout tail:\n${tail.out}\nstderr tail:\n${tail.err}`);
+      }
+      const tail = makerBot.tail();
+      if (!String(tail.out || '').includes('"type":"ready"')) throw new Error('not_ready');
+    },
+    { label: 'maker-bot ready', tries: 160, delayMs: 250 }
+  );
+
   const tradeId = `swap_${crypto.randomUUID()}`;
   const nowSec = Math.floor(Date.now() / 1000);
-	  const rfqUnsigned = createUnsignedEnvelope({
-	    v: 1,
-	    kind: KIND.RFQ,
-	    tradeId,
+  const rfqUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.RFQ,
+    tradeId,
     body: {
       rfq_channel: rfqChannel,
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 10000,
       usdt_amount: '1234567',
-	      valid_until_unix: nowSec + 60,
-	    },
-	  });
-	  const rfqSigned = signEnvelope(rfqUnsigned, takerKeys);
+      // Fee ceilings + refund window are pre-filtering inputs for the maker.
+      max_platform_fee_bps: 500,
+      max_trade_fee_bps: 1000,
+      max_total_fee_bps: 1500,
+      min_sol_refund_window_sec: 72 * 3600,
+      max_sol_refund_window_sec: 7 * 24 * 3600,
+      valid_until_unix: nowSec + 60,
+    },
+  });
+  const rfqSigned = signEnvelope(rfqUnsigned, takerKeys);
+
+  // Make sure RFQ broadcast is allowed (avoids silent send-denied loops).
+  ensureOk(await takerSc.send(rfqChannel, rfqSigned), 'send rfq (initial)');
 
   // Maker bot might not be subscribed yet; resend RFQ until we see a quote.
   let rfqStop = false;
@@ -737,28 +839,36 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
   t.after(() => clearInterval(rfqResender));
 
   // Wait for maker quote, then attempt hijack accept from attacker.
-  const quoteEvt = await waitForSidechannel(takerSc, {
-    channel: rfqChannel,
-    pred: (m) => m?.kind === KIND.QUOTE && String(m.trade_id) === tradeId,
-    timeoutMs: 10_000,
-    label: 'wait quote',
-  });
+  let quoteEvt;
+  try {
+    quoteEvt = await waitForSidechannel(takerSc, {
+      channel: rfqChannel,
+      pred: (m) => m?.kind === KIND.QUOTE && String(m.trade_id) === tradeId,
+      timeoutMs: 10_000,
+      label: 'wait quote',
+    });
+  } catch (err) {
+    const tail = makerBot?.tail?.() || { out: '', err: '' };
+    throw new Error(
+      `${err?.message ?? String(err)}\nmaker-bot stdout tail:\n${tail.out}\nmaker-bot stderr tail:\n${tail.err}`
+    );
+  }
   rfqStop = true;
   clearInterval(rfqResender);
   const quote = quoteEvt.message;
   const quoteId = hashUnsignedEnvelope(stripSignature(quote));
   const rfqId = String(quote.body?.rfq_id || '').trim().toLowerCase();
 
-	  const attackerAcceptUnsigned = createUnsignedEnvelope({
-	    v: 1,
-	    kind: KIND.QUOTE_ACCEPT,
-	    tradeId,
-	    body: { rfq_id: rfqId, quote_id: quoteId },
-	  });
-	  {
-	    const qa = signEnvelope(attackerAcceptUnsigned, attackerKeys);
-	    ensureOk(await attackerSc.send(rfqChannel, qa), 'send attacker quote_accept');
-	  }
+  const attackerAcceptUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.QUOTE_ACCEPT,
+    tradeId,
+    body: { rfq_id: rfqId, quote_id: quoteId },
+  });
+  {
+    const qa = signEnvelope(attackerAcceptUnsigned, attackerKeys);
+    ensureOk(await attackerSc.send(rfqChannel, qa), 'send attacker quote_accept');
+  }
 
   // Maker must ignore the hijack accept (no swap invite should be broadcast).
   await expectNoSidechannel(takerSc, {
@@ -769,16 +879,16 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
   });
 
   // Legit accept from the RFQ signer should succeed.
-	  const takerAcceptUnsigned = createUnsignedEnvelope({
-	    v: 1,
-	    kind: KIND.QUOTE_ACCEPT,
-	    tradeId,
-	    body: { rfq_id: rfqId, quote_id: quoteId },
-	  });
-	  {
-	    const qa = signEnvelope(takerAcceptUnsigned, takerKeys);
-	    ensureOk(await takerSc.send(rfqChannel, qa), 'send taker quote_accept');
-	  }
+  const takerAcceptUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.QUOTE_ACCEPT,
+    tradeId,
+    body: { rfq_id: rfqId, quote_id: quoteId },
+  });
+  {
+    const qa = signEnvelope(takerAcceptUnsigned, takerKeys);
+    ensureOk(await takerSc.send(rfqChannel, qa), 'send taker quote_accept');
+  }
 
   const inviteEvt = await waitForSidechannel(takerSc, {
     channel: rfqChannel,

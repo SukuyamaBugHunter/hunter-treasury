@@ -54,6 +54,16 @@ const satsParam = { type: 'integer', minimum: 1, maximum: 21_000_000 * 100_000_0
 // NOTE: This is a first, safe “tool surface” for prompting.
 // The executor (Phase 5B) must validate and *must not* allow arbitrary file paths or shell execution.
 export const INTERCOMSWAP_TOOLS = [
+  tool(
+    'intercomswap_app_info',
+    'Get app binding info (app_tag, Solana program id, derived app_hash).',
+    emptyParams
+  ),
+  tool(
+    'intercomswap_env_get',
+    'Get local environment/config summary (LN network, Solana RPC, receipts DB path). Does not touch the network.',
+    emptyParams
+  ),
   // SC-Bridge safe RPCs (no CLI mirroring).
   tool('intercomswap_sc_info', 'Get peer info via SC-Bridge (safe fields only).', emptyParams),
   tool('intercomswap_sc_stats', 'Get SC-Bridge stats.', emptyParams),
@@ -224,6 +234,11 @@ export const INTERCOMSWAP_TOOLS = [
       trade_id: { type: 'string', minLength: 1, maxLength: 128 },
       btc_sats: satsParam,
       usdt_amount: atomicAmountParam,
+      max_platform_fee_bps: { type: 'integer', minimum: 0, maximum: 500, description: 'Optional fee ceiling for platform fee (bps).' },
+      max_trade_fee_bps: { type: 'integer', minimum: 0, maximum: 1000, description: 'Optional fee ceiling for trade fee (bps).' },
+      max_total_fee_bps: { type: 'integer', minimum: 0, maximum: 1500, description: 'Optional ceiling for platform+trade fee (bps).' },
+      min_sol_refund_window_sec: { type: 'integer', minimum: 3600, maximum: 7 * 24 * 3600, description: 'Optional minimum Solana refund/claim window in seconds.' },
+      max_sol_refund_window_sec: { type: 'integer', minimum: 3600, maximum: 7 * 24 * 3600, description: 'Optional maximum Solana refund/claim window in seconds.' },
       valid_until_unix: { ...unixSecParam, description: 'Optional expiry for the RFQ (unix seconds).' },
     },
     required: ['channel', 'trade_id', 'btc_sats', 'usdt_amount'],
@@ -240,10 +255,15 @@ export const INTERCOMSWAP_TOOLS = [
       rfq_id: hex32Param,
       btc_sats: satsParam,
       usdt_amount: atomicAmountParam,
+      platform_fee_bps: { type: 'integer', minimum: 0, maximum: 500 },
+      trade_fee_bps: { type: 'integer', minimum: 0, maximum: 1000 },
+      trade_fee_collector: base58Param,
+      platform_fee_collector: { ...base58Param, description: 'Optional override, else use program config fee collector.' },
+      sol_refund_window_sec: { type: 'integer', minimum: 3600, maximum: 7 * 24 * 3600, description: 'Solana refund/claim window (seconds) that will be used in binding TERMS.' },
       valid_until_unix: unixSecParam,
       valid_for_sec: { type: 'integer', minimum: 10, maximum: 60 * 60 * 24 * 7 },
     },
-    required: ['channel', 'trade_id', 'rfq_id', 'btc_sats', 'usdt_amount'],
+    required: ['channel', 'trade_id', 'rfq_id', 'btc_sats', 'usdt_amount', 'platform_fee_bps', 'trade_fee_bps', 'trade_fee_collector'],
   }
   ),
   tool(
@@ -260,10 +280,15 @@ export const INTERCOMSWAP_TOOLS = [
             { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to an RFQ envelope.' },
           ],
         },
+        platform_fee_bps: { type: 'integer', minimum: 0, maximum: 500 },
+        trade_fee_bps: { type: 'integer', minimum: 0, maximum: 1000 },
+        trade_fee_collector: base58Param,
+        platform_fee_collector: { ...base58Param, description: 'Optional override, else use program config fee collector.' },
+        sol_refund_window_sec: { type: 'integer', minimum: 3600, maximum: 7 * 24 * 3600, description: 'Solana refund/claim window (seconds) that will be used in binding TERMS.' },
         valid_until_unix: unixSecParam,
         valid_for_sec: { type: 'integer', minimum: 10, maximum: 60 * 60 * 24 * 7 },
       },
-      required: ['channel', 'rfq_envelope'],
+      required: ['channel', 'rfq_envelope', 'platform_fee_bps', 'trade_fee_bps', 'trade_fee_collector'],
     }
   ),
   tool('intercomswap_quote_accept', 'Post a signed QUOTE_ACCEPT envelope into the RFQ channel (accept a quote).', {

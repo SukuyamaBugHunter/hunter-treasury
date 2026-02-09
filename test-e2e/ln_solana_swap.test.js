@@ -122,7 +122,6 @@ function hasConfirmedUtxo(listFundsResult) {
 
 async function startSolanaValidator({ soPath }) {
   const ledgerPath = path.join(repoRoot, 'onchain/solana/ledger-e2e');
-  const url = 'https://api.devnet.solana.com';
   const args = [
     '--reset',
     '--ledger',
@@ -133,12 +132,6 @@ async function startSolanaValidator({ soPath }) {
     '8899',
     '--faucet-port',
     '9900',
-    '--url',
-    url,
-    '--clone',
-    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-    '--clone',
-    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
     '--bpf-program',
     LN_USDT_ESCROW_PROGRAM_ID.toBase58(),
     soPath,

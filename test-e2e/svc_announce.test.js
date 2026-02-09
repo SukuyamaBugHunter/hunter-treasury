@@ -93,9 +93,23 @@ function spawnPeer(args, { label }) {
 }
 
 async function killProc(proc) {
-  if (!proc || proc.killed) return;
-  proc.kill('SIGINT');
-  await new Promise((r) => proc.once('exit', r));
+  if (!proc) return;
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill('SIGINT');
+  } catch (_e) {}
+  await Promise.race([
+    new Promise((r) => proc.once('exit', r)),
+    new Promise((r) => setTimeout(r, 5000)),
+  ]);
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill('SIGKILL');
+  } catch (_e) {}
+  await Promise.race([
+    new Promise((r) => proc.once('exit', r)),
+    new Promise((r) => setTimeout(r, 5000)),
+  ]);
 }
 
 function spawnBot(args, { label }) {

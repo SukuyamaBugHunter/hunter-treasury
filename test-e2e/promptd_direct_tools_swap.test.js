@@ -95,7 +95,6 @@ function hasConfirmedUtxo(listFundsResult) {
 
 async function startSolanaValidator({ soPath, ledgerSuffix }) {
   const ledgerPath = path.join(repoRoot, `onchain/solana/ledger-e2e-promptd-${ledgerSuffix}`);
-  const url = 'https://api.devnet.solana.com';
   const args = [
     '--reset',
     '--ledger',
@@ -106,12 +105,6 @@ async function startSolanaValidator({ soPath, ledgerSuffix }) {
     '8899',
     '--faucet-port',
     '9900',
-    '--url',
-    url,
-    '--clone',
-    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-    '--clone',
-    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
     '--bpf-program',
     LN_USDT_ESCROW_PROGRAM_ID.toBase58(),
     soPath,
@@ -183,9 +176,23 @@ function spawnPeer(args, { label }) {
 }
 
 async function killProc(proc) {
-  if (!proc || proc.killed) return;
-  proc.kill('SIGINT');
-  await new Promise((r) => proc.once('exit', r));
+  if (!proc) return;
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill('SIGINT');
+  } catch (_e) {}
+  await Promise.race([
+    new Promise((r) => proc.once('exit', r)),
+    new Promise((r) => setTimeout(r, 5000)),
+  ]);
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill('SIGKILL');
+  } catch (_e) {}
+  await Promise.race([
+    new Promise((r) => proc.once('exit', r)),
+    new Promise((r) => setTimeout(r, 5000)),
+  ]);
 }
 
 async function pickFreePort() {
@@ -659,7 +666,14 @@ test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escr
       sessionId: makerSession,
       autoApprove: true,
       name: 'intercomswap_quote_post_from_rfq',
-      args: { channel: rfqChannel, rfq_envelope: rfqSeen.envelope_handle, valid_for_sec: 60 },
+      args: {
+        channel: rfqChannel,
+        rfq_envelope: rfqSeen.envelope_handle,
+        platform_fee_bps: 50,
+        trade_fee_bps: 50,
+        trade_fee_collector: makerSolPk,
+        valid_for_sec: 60,
+      },
     });
 
     const seen = await promptTool({

@@ -404,6 +404,14 @@
   border-color: rgba(132, 204, 22, 0.25);
   background: rgba(132, 204, 22, 0.10);
 }
+.chip.warn {
+  border-color: rgba(245, 158, 11, 0.25);
+  background: rgba(245, 158, 11, 0.10);
+}
+.chip.danger {
+  border-color: rgba(244, 63, 94, 0.25);
+  background: rgba(244, 63, 94, 0.10);
+}
 
 .vlist {
   flex: 1;

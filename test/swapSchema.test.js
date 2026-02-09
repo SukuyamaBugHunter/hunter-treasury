@@ -5,8 +5,11 @@ import PeerWallet from 'trac-wallet';
 
 import { createUnsignedEnvelope, encodeEnvelopeForSigning, attachSignature } from '../src/protocol/signedMessage.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
+import { deriveIntercomswapAppHash } from '../src/swap/app.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
 import { ASSET, KIND, PAIR } from '../src/swap/constants.js';
+
+const APP_HASH = deriveIntercomswapAppHash({ solanaProgramId: '11111111111111111111111111111111' });
 
 async function newWallet() {
   const w = new PeerWallet();
@@ -38,6 +41,7 @@ test('swap schema: terms + accept validate', async () => {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 12345,
       usdt_amount: '1000000',
       usdt_decimals: 6,
@@ -80,8 +84,12 @@ test('swap schema: rfq + quote validate', async () => {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1000,
       usdt_amount: '1000000',
+      max_platform_fee_bps: 500,
+      max_trade_fee_bps: 1000,
+      max_total_fee_bps: 1500,
       valid_until_unix: nowSec + 60,
     },
     ts: Date.now(),
@@ -98,8 +106,12 @@ test('swap schema: rfq + quote validate', async () => {
       rfq_id: rfqId,
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1000,
       usdt_amount: '1000000',
+      platform_fee_bps: 50,
+      trade_fee_bps: 50,
+      trade_fee_collector: '11111111111111111111111111111111',
       valid_until_unix: nowSec + 30,
     },
     ts: Date.now(),
@@ -115,6 +127,7 @@ test('swap schema: rfq + quote validate', async () => {
       rfq_id: rfqId,
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1000,
       usdt_amount: '1000000',
     },
@@ -138,6 +151,7 @@ test('swap schema: quote_accept + swap_invite validate', async () => {
     body: {
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1000,
       usdt_amount: '1000000',
       valid_until_unix: nowSec + 60,
@@ -155,6 +169,7 @@ test('swap schema: quote_accept + swap_invite validate', async () => {
       rfq_id: rfqId,
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      app_hash: APP_HASH,
       btc_sats: 1000,
       usdt_amount: '1000000',
       valid_until_unix: nowSec + 30,

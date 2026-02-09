@@ -152,6 +152,7 @@ function normalizeAtomicAmount(s, label = 'amount') {
 
 const SOL_REFUND_MIN_SEC = 3600; // 1h
 const SOL_REFUND_MAX_SEC = 7 * 24 * 3600; // 1w
+const SOL_REFUND_DEFAULT_SEC = 72 * 3600; // 72h
 
 function assertRefundAfterUnixWindow(refundAfterUnix, toolName) {
   const now = Math.floor(Date.now() / 1000);
@@ -565,6 +566,78 @@ export class ToolExecutor {
   async execute(toolName, args, { autoApprove = false, dryRun = false, secrets = null } = {}) {
     assertPlainObject(args ?? {}, toolName);
 
+    if (toolName === 'intercomswap_app_info') {
+      assertAllowedKeys(args, toolName, []);
+      const programId = this._programId().toBase58();
+      const appHash = deriveIntercomswapAppHash({ solanaProgramId: programId, appTag: INTERCOMSWAP_APP_TAG });
+      return { type: 'app_info', app_tag: INTERCOMSWAP_APP_TAG, solana_program_id: programId, app_hash: appHash };
+    }
+
+    if (toolName === 'intercomswap_env_get') {
+      assertAllowedKeys(args, toolName, []);
+
+      const lnImpl = String(this.ln?.impl || '').trim() || 'cln';
+      const lnBackend = String(this.ln?.backend || '').trim() || 'cli';
+      const lnNetwork = String(this.ln?.network || '').trim() || '';
+
+      const solRpcRaw = String(this.solana?.rpcUrls || '').trim();
+      const solRpcUrls = solRpcRaw
+        ? solRpcRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+      const solCommitment = String(this.solana?.commitment || '').trim() || 'confirmed';
+      const programId = this._programId().toBase58();
+      const appHash = deriveIntercomswapAppHash({ solanaProgramId: programId, appTag: INTERCOMSWAP_APP_TAG });
+
+      const classifyLn = (net) => {
+        const s = String(net || '').trim().toLowerCase();
+        if (!s) return { kind: 'unknown', is_test: null };
+        if (['regtest', 'testnet', 'signet'].includes(s)) return { kind: 'test', is_test: true };
+        if (['bitcoin', 'mainnet'].includes(s)) return { kind: 'mainnet', is_test: false };
+        return { kind: 'unknown', is_test: null };
+      };
+      const classifySol = (urls) => {
+        const hay = (Array.isArray(urls) ? urls : [])
+          .map((u) => String(u || '').toLowerCase())
+          .join(' ');
+        if (!hay) return { kind: 'unknown', is_test: null };
+        if (hay.includes('127.0.0.1:8899') || hay.includes('localhost:8899')) {
+          return { kind: 'local', is_test: true };
+        }
+        if (hay.includes('devnet')) return { kind: 'devnet', is_test: true };
+        if (hay.includes('testnet')) return { kind: 'testnet', is_test: true };
+        if (hay.includes('mainnet')) return { kind: 'mainnet', is_test: false };
+        return { kind: 'unknown', is_test: null };
+      };
+
+      const lnClass = classifyLn(lnNetwork);
+      const solClass = classifySol(solRpcUrls);
+
+      let envKind = 'unknown';
+      if (lnClass.is_test === true && solClass.is_test === true) envKind = 'test';
+      else if (lnClass.is_test === false && solClass.is_test === false) envKind = 'mainnet';
+      else if (lnClass.is_test !== null || solClass.is_test !== null) envKind = 'mixed';
+
+      const receiptsDb = String(this.receipts?.dbPath || '').trim() || '';
+
+      return {
+        type: 'env',
+        env_kind: envKind,
+        ln: { impl: lnImpl, backend: lnBackend, network: lnNetwork || null, classify: lnClass },
+        solana: {
+          rpc_urls: solRpcUrls,
+          commitment: solCommitment,
+          program_id: programId,
+          classify: solClass,
+        },
+        app: { app_tag: INTERCOMSWAP_APP_TAG, app_hash: appHash },
+        sc_bridge: { url: String(this.scBridge?.url || '').trim() || null, token_configured: Boolean(this.scBridge?.token) },
+        receipts: { db: receiptsDb || null },
+      };
+    }
+
     // Read-only SC-Bridge
     if (toolName === 'intercomswap_sc_info') {
       assertAllowedKeys(args, toolName, []);
@@ -732,12 +805,35 @@ export class ToolExecutor {
 
     // RFQ / swap envelopes (signed + broadcast)
     if (toolName === 'intercomswap_rfq_post') {
-      assertAllowedKeys(args, toolName, ['channel', 'trade_id', 'btc_sats', 'usdt_amount', 'valid_until_unix']);
+      assertAllowedKeys(args, toolName, [
+        'channel',
+        'trade_id',
+        'btc_sats',
+        'usdt_amount',
+        'max_platform_fee_bps',
+        'max_trade_fee_bps',
+        'max_total_fee_bps',
+        'min_sol_refund_window_sec',
+        'max_sol_refund_window_sec',
+        'valid_until_unix',
+      ]);
       requireApproval(toolName, autoApprove);
       const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
       const tradeId = expectString(args, toolName, 'trade_id', { min: 1, max: 128, pattern: /^[A-Za-z0-9_.:-]+$/ });
       const btcSats = expectInt(args, toolName, 'btc_sats', { min: 1 });
       const usdtAmount = normalizeAtomicAmount(expectString(args, toolName, 'usdt_amount', { max: 64 }), 'usdt_amount');
+      const maxPlatformFeeBps = expectOptionalInt(args, toolName, 'max_platform_fee_bps', { min: 0, max: 500 }) ?? 500;
+      const maxTradeFeeBps = expectOptionalInt(args, toolName, 'max_trade_fee_bps', { min: 0, max: 1000 }) ?? 1000;
+      const maxTotalFeeBps = expectOptionalInt(args, toolName, 'max_total_fee_bps', { min: 0, max: 1500 }) ?? 1500;
+      const minSolRefundWindowSec =
+        expectOptionalInt(args, toolName, 'min_sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC }) ??
+        SOL_REFUND_DEFAULT_SEC;
+      const maxSolRefundWindowSec =
+        expectOptionalInt(args, toolName, 'max_sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC }) ??
+        SOL_REFUND_MAX_SEC;
+      if (minSolRefundWindowSec > maxSolRefundWindowSec) {
+        throw new Error(`${toolName}: min_sol_refund_window_sec must be <= max_sol_refund_window_sec`);
+      }
       const validUntil = expectOptionalInt(args, toolName, 'valid_until_unix', { min: 1 });
       const appHash = deriveIntercomswapAppHash({ solanaProgramId: this._programId().toBase58() });
 
@@ -751,6 +847,11 @@ export class ToolExecutor {
           app_hash: appHash,
           btc_sats: btcSats,
           usdt_amount: usdtAmount,
+          max_platform_fee_bps: maxPlatformFeeBps,
+          max_trade_fee_bps: maxTradeFeeBps,
+          max_total_fee_bps: maxTotalFeeBps,
+          min_sol_refund_window_sec: minSolRefundWindowSec,
+          max_sol_refund_window_sec: maxSolRefundWindowSec,
           ...(validUntil ? { valid_until_unix: validUntil } : {}),
         },
       });
@@ -773,6 +874,11 @@ export class ToolExecutor {
         'rfq_id',
         'btc_sats',
         'usdt_amount',
+        'platform_fee_bps',
+        'trade_fee_bps',
+        'trade_fee_collector',
+        'platform_fee_collector',
+        'sol_refund_window_sec',
         'valid_until_unix',
         'valid_for_sec',
       ]);
@@ -782,6 +888,16 @@ export class ToolExecutor {
       const rfqId = normalizeHex32(expectString(args, toolName, 'rfq_id', { min: 64, max: 64 }), 'rfq_id');
       const btcSats = expectInt(args, toolName, 'btc_sats', { min: 1 });
       const usdtAmount = normalizeAtomicAmount(expectString(args, toolName, 'usdt_amount', { max: 64 }), 'usdt_amount');
+      const platformFeeBps = expectInt(args, toolName, 'platform_fee_bps', { min: 0, max: 500 });
+      const tradeFeeBps = expectInt(args, toolName, 'trade_fee_bps', { min: 0, max: 1000 });
+      if (platformFeeBps + tradeFeeBps > 1500) throw new Error(`${toolName}: total fee bps exceeds 1500 cap`);
+      const tradeFeeCollector = normalizeBase58(expectString(args, toolName, 'trade_fee_collector', { max: 64 }), 'trade_fee_collector');
+      const platformFeeCollector = args.platform_fee_collector
+        ? normalizeBase58(String(args.platform_fee_collector), 'platform_fee_collector')
+        : null;
+      const solRefundWindowSec =
+        expectOptionalInt(args, toolName, 'sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC }) ??
+        SOL_REFUND_DEFAULT_SEC;
       const validUntilRaw = expectOptionalInt(args, toolName, 'valid_until_unix', { min: 1 });
       const validFor = expectOptionalInt(args, toolName, 'valid_for_sec', { min: 10, max: 60 * 60 * 24 * 7 });
       const nowSec = Math.floor(Date.now() / 1000);
@@ -802,6 +918,11 @@ export class ToolExecutor {
           app_hash: appHash,
           btc_sats: btcSats,
           usdt_amount: usdtAmount,
+          platform_fee_bps: platformFeeBps,
+          trade_fee_bps: tradeFeeBps,
+          trade_fee_collector: tradeFeeCollector,
+          sol_refund_window_sec: solRefundWindowSec,
+          ...(platformFeeCollector ? { platform_fee_collector: platformFeeCollector } : {}),
           valid_until_unix: validUntil,
         },
       });
@@ -816,7 +937,17 @@ export class ToolExecutor {
     }
 
     if (toolName === 'intercomswap_quote_post_from_rfq') {
-      assertAllowedKeys(args, toolName, ['channel', 'rfq_envelope', 'valid_until_unix', 'valid_for_sec']);
+      assertAllowedKeys(args, toolName, [
+        'channel',
+        'rfq_envelope',
+        'platform_fee_bps',
+        'trade_fee_bps',
+        'trade_fee_collector',
+        'platform_fee_collector',
+        'sol_refund_window_sec',
+        'valid_until_unix',
+        'valid_for_sec',
+      ]);
       requireApproval(toolName, autoApprove);
       const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
       const rfq = resolveSecretArg(secrets, args.rfq_envelope, { label: 'rfq_envelope', expectType: 'object' });
@@ -833,6 +964,30 @@ export class ToolExecutor {
       const usdtAmount = normalizeAtomicAmount(String(rfq?.body?.usdt_amount), 'rfq_envelope.body.usdt_amount');
 
       const rfqId = hashUnsignedEnvelope(stripSignature(rfq));
+
+      const platformFeeBps = expectInt(args, toolName, 'platform_fee_bps', { min: 0, max: 500 });
+      const tradeFeeBps = expectInt(args, toolName, 'trade_fee_bps', { min: 0, max: 1000 });
+      if (platformFeeBps + tradeFeeBps > 1500) throw new Error(`${toolName}: total fee bps exceeds 1500 cap`);
+      const tradeFeeCollector = normalizeBase58(expectString(args, toolName, 'trade_fee_collector', { max: 64 }), 'trade_fee_collector');
+      const platformFeeCollector = args.platform_fee_collector
+        ? normalizeBase58(String(args.platform_fee_collector), 'platform_fee_collector')
+        : null;
+      const solRefundWindowSec =
+        expectOptionalInt(args, toolName, 'sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC }) ??
+        SOL_REFUND_DEFAULT_SEC;
+
+      const rfqMinWindowRaw = rfq?.body?.min_sol_refund_window_sec;
+      const rfqMaxWindowRaw = rfq?.body?.max_sol_refund_window_sec;
+      const rfqMinWindow =
+        rfqMinWindowRaw !== undefined && rfqMinWindowRaw !== null ? Number.parseInt(String(rfqMinWindowRaw), 10) : null;
+      const rfqMaxWindow =
+        rfqMaxWindowRaw !== undefined && rfqMaxWindowRaw !== null ? Number.parseInt(String(rfqMaxWindowRaw), 10) : null;
+      if (rfqMinWindow !== null && Number.isFinite(rfqMinWindow) && solRefundWindowSec < rfqMinWindow) {
+        throw new Error(`${toolName}: sol_refund_window_sec below RFQ minimum`);
+      }
+      if (rfqMaxWindow !== null && Number.isFinite(rfqMaxWindow) && solRefundWindowSec > rfqMaxWindow) {
+        throw new Error(`${toolName}: sol_refund_window_sec above RFQ maximum`);
+      }
 
       const validUntilRaw = expectOptionalInt(args, toolName, 'valid_until_unix', { min: 1 });
       const validFor = expectOptionalInt(args, toolName, 'valid_for_sec', { min: 10, max: 60 * 60 * 24 * 7 });
@@ -859,6 +1014,11 @@ export class ToolExecutor {
           app_hash: appHash,
           btc_sats: btcSats,
           usdt_amount: usdtAmount,
+          platform_fee_bps: platformFeeBps,
+          trade_fee_bps: tradeFeeBps,
+          trade_fee_collector: tradeFeeCollector,
+          sol_refund_window_sec: solRefundWindowSec,
+          ...(platformFeeCollector ? { platform_fee_collector: platformFeeCollector } : {}),
           valid_until_unix: validUntil,
         },
       });
@@ -883,6 +1043,12 @@ export class ToolExecutor {
       if (quote.kind !== KIND.QUOTE) throw new Error(`${toolName}: quote_envelope.kind must be ${KIND.QUOTE}`);
       const sigOk = verifySignedEnvelope(quote);
       if (!sigOk.ok) throw new Error(`${toolName}: quote_envelope signature invalid: ${sigOk.error}`);
+
+      const appHash = deriveIntercomswapAppHash({ solanaProgramId: this._programId().toBase58(), appTag: INTERCOMSWAP_APP_TAG });
+      const quoteAppHash = String(quote?.body?.app_hash || '').trim().toLowerCase();
+      if (quoteAppHash !== appHash) {
+        throw new Error(`${toolName}: quote_envelope.app_hash mismatch (wrong app/program for this channel)`);
+      }
 
       const quoteId = hashUnsignedEnvelope(stripSignature(quote));
       const rfqId = String(quote.body.rfq_id);
@@ -1245,6 +1411,7 @@ export class ToolExecutor {
         : null;
       const termsValidUntil = expectOptionalInt(args, toolName, 'terms_valid_until_unix', { min: 1 });
 
+      const appHash = deriveIntercomswapAppHash({ solanaProgramId: this._programId().toBase58(), appTag: INTERCOMSWAP_APP_TAG });
       const unsigned = createUnsignedEnvelope({
         v: 1,
         kind: KIND.TERMS,
@@ -1252,6 +1419,7 @@ export class ToolExecutor {
         body: {
           pair: PAIR.BTC_LN__USDT_SOL,
           direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+          app_hash: appHash,
           btc_sats: btcSats,
           usdt_amount: usdtAmount,
           usdt_decimals: 6,
@@ -1352,6 +1520,12 @@ export class ToolExecutor {
       if (terms.kind !== KIND.TERMS) throw new Error(`${toolName}: terms_envelope.kind must be ${KIND.TERMS}`);
       const sigOk = verifySignedEnvelope(terms);
       if (!sigOk.ok) throw new Error(`${toolName}: terms_envelope signature invalid: ${sigOk.error}`);
+
+      const appHash = deriveIntercomswapAppHash({ solanaProgramId: this._programId().toBase58(), appTag: INTERCOMSWAP_APP_TAG });
+      const termsAppHash = String(terms?.body?.app_hash || '').trim().toLowerCase();
+      if (termsAppHash !== appHash) {
+        throw new Error(`${toolName}: terms_envelope.app_hash mismatch (wrong app/program for this channel)`);
+      }
 
       const tradeId = String(terms.trade_id || '').trim();
       if (!tradeId) throw new Error(`${toolName}: terms_envelope missing trade_id`);
@@ -1713,6 +1887,17 @@ export class ToolExecutor {
       if (!tradeId) throw new Error(`${toolName}: terms_envelope missing trade_id`);
       if (String(invoice.trade_id || '').trim() !== tradeId) throw new Error(`${toolName}: invoice trade_id mismatch vs terms`);
       if (String(escrow.trade_id || '').trim() !== tradeId) throw new Error(`${toolName}: escrow trade_id mismatch vs terms`);
+
+      const expectedProgramId = this._programId().toBase58();
+      const expectedAppHash = deriveIntercomswapAppHash({ solanaProgramId: expectedProgramId, appTag: INTERCOMSWAP_APP_TAG });
+      const termsAppHash = String(terms?.body?.app_hash || '').trim().toLowerCase();
+      if (termsAppHash !== expectedAppHash) {
+        throw new Error(`${toolName}: terms_envelope.app_hash mismatch (wrong app/program for this channel)`);
+      }
+      const escrowProgramId = String(escrow?.body?.program_id || '').trim();
+      if (escrowProgramId && escrowProgramId !== expectedProgramId) {
+        throw new Error(`${toolName}: escrow.program_id mismatch (expected ${expectedProgramId}, got ${escrowProgramId})`);
+      }
 
       const commitment = this._commitment();
       return this._pool().call(async (connection) => {

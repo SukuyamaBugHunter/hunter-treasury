@@ -103,6 +103,64 @@ export function validateSwapBody(kind, body) {
       if (!isHex(body.app_hash, 32)) return { ok: false, error: 'rfq.app_hash must be 32-byte hex' };
       if (!isPosInt(body.btc_sats)) return { ok: false, error: 'rfq.btc_sats must be a positive integer' };
       if (!isAmountString(body.usdt_amount)) return { ok: false, error: 'rfq.usdt_amount must be a decimal string' };
+      // Optional fee ceilings (pre-filtering only; binding fees are in TERMS).
+      if (body.max_platform_fee_bps !== undefined && body.max_platform_fee_bps !== null) {
+        if (!isUint(body.max_platform_fee_bps)) {
+          return { ok: false, error: 'rfq.max_platform_fee_bps must be an integer >= 0' };
+        }
+        if (Number(body.max_platform_fee_bps) > 500) {
+          return { ok: false, error: 'rfq.max_platform_fee_bps exceeds 500 bps cap' };
+        }
+      }
+      if (body.max_trade_fee_bps !== undefined && body.max_trade_fee_bps !== null) {
+        if (!isUint(body.max_trade_fee_bps)) {
+          return { ok: false, error: 'rfq.max_trade_fee_bps must be an integer >= 0' };
+        }
+        if (Number(body.max_trade_fee_bps) > 1000) {
+          return { ok: false, error: 'rfq.max_trade_fee_bps exceeds 1000 bps cap' };
+        }
+      }
+      if (body.max_total_fee_bps !== undefined && body.max_total_fee_bps !== null) {
+        if (!isUint(body.max_total_fee_bps)) {
+          return { ok: false, error: 'rfq.max_total_fee_bps must be an integer >= 0' };
+        }
+        if (Number(body.max_total_fee_bps) > 1500) {
+          return { ok: false, error: 'rfq.max_total_fee_bps exceeds 1500 bps cap' };
+        }
+      }
+      // Optional Solana refund/claim window requirements (seconds).
+      // This is a negotiation input (pre-filtering). Binding value is terms.sol_refund_after_unix.
+      if (body.min_sol_refund_window_sec !== undefined && body.min_sol_refund_window_sec !== null) {
+        if (!isUint(body.min_sol_refund_window_sec)) {
+          return { ok: false, error: 'rfq.min_sol_refund_window_sec must be an integer >= 0' };
+        }
+        if (Number(body.min_sol_refund_window_sec) < 3600) {
+          return { ok: false, error: 'rfq.min_sol_refund_window_sec must be >= 3600' };
+        }
+        if (Number(body.min_sol_refund_window_sec) > 7 * 24 * 3600) {
+          return { ok: false, error: 'rfq.min_sol_refund_window_sec must be <= 604800' };
+        }
+      }
+      if (body.max_sol_refund_window_sec !== undefined && body.max_sol_refund_window_sec !== null) {
+        if (!isUint(body.max_sol_refund_window_sec)) {
+          return { ok: false, error: 'rfq.max_sol_refund_window_sec must be an integer >= 0' };
+        }
+        if (Number(body.max_sol_refund_window_sec) < 3600) {
+          return { ok: false, error: 'rfq.max_sol_refund_window_sec must be >= 3600' };
+        }
+        if (Number(body.max_sol_refund_window_sec) > 7 * 24 * 3600) {
+          return { ok: false, error: 'rfq.max_sol_refund_window_sec must be <= 604800' };
+        }
+      }
+      if (
+        body.min_sol_refund_window_sec !== undefined &&
+        body.min_sol_refund_window_sec !== null &&
+        body.max_sol_refund_window_sec !== undefined &&
+        body.max_sol_refund_window_sec !== null &&
+        Number(body.min_sol_refund_window_sec) > Number(body.max_sol_refund_window_sec)
+      ) {
+        return { ok: false, error: 'rfq.min_sol_refund_window_sec must be <= rfq.max_sol_refund_window_sec' };
+      }
       if (body.sol_mint !== undefined && body.sol_mint !== null) {
         if (!isBase58(body.sol_mint)) return { ok: false, error: 'rfq.sol_mint must be base58' };
       }
@@ -124,6 +182,53 @@ export function validateSwapBody(kind, body) {
       if (!isHex(body.app_hash, 32)) return { ok: false, error: 'quote.app_hash must be 32-byte hex' };
       if (!isAmountString(body.usdt_amount)) return { ok: false, error: 'quote.usdt_amount must be a decimal string' };
       if (!isPosInt(body.btc_sats)) return { ok: false, error: 'quote.btc_sats must be a positive integer' };
+      // Optional fee preview (pre-filtering only; binding fees are in TERMS).
+      if (body.platform_fee_bps !== undefined && body.platform_fee_bps !== null) {
+        if (!isUint(body.platform_fee_bps)) {
+          return { ok: false, error: 'quote.platform_fee_bps must be an integer >= 0' };
+        }
+        if (Number(body.platform_fee_bps) > 500) {
+          return { ok: false, error: 'quote.platform_fee_bps exceeds 500 bps cap' };
+        }
+      }
+      if (body.trade_fee_bps !== undefined && body.trade_fee_bps !== null) {
+        if (!isUint(body.trade_fee_bps)) {
+          return { ok: false, error: 'quote.trade_fee_bps must be an integer >= 0' };
+        }
+        if (Number(body.trade_fee_bps) > 1000) {
+          return { ok: false, error: 'quote.trade_fee_bps exceeds 1000 bps cap' };
+        }
+      }
+      if (
+        body.platform_fee_bps !== undefined &&
+        body.platform_fee_bps !== null &&
+        body.trade_fee_bps !== undefined &&
+        body.trade_fee_bps !== null &&
+        Number(body.platform_fee_bps) + Number(body.trade_fee_bps) > 1500
+      ) {
+        return { ok: false, error: 'quote total fee bps exceeds 1500 bps cap' };
+      }
+      if (body.platform_fee_collector !== undefined && body.platform_fee_collector !== null) {
+        if (!isBase58(body.platform_fee_collector)) {
+          return { ok: false, error: 'quote.platform_fee_collector must be base58' };
+        }
+      }
+      if (body.trade_fee_collector !== undefined && body.trade_fee_collector !== null) {
+        if (!isBase58(body.trade_fee_collector)) {
+          return { ok: false, error: 'quote.trade_fee_collector must be base58' };
+        }
+      }
+      if (body.sol_refund_window_sec !== undefined && body.sol_refund_window_sec !== null) {
+        if (!isUint(body.sol_refund_window_sec)) {
+          return { ok: false, error: 'quote.sol_refund_window_sec must be an integer >= 0' };
+        }
+        if (Number(body.sol_refund_window_sec) < 3600) {
+          return { ok: false, error: 'quote.sol_refund_window_sec must be >= 3600' };
+        }
+        if (Number(body.sol_refund_window_sec) > 7 * 24 * 3600) {
+          return { ok: false, error: 'quote.sol_refund_window_sec must be <= 604800' };
+        }
+      }
       if (body.sol_mint !== undefined && body.sol_mint !== null) {
         if (!isBase58(body.sol_mint)) return { ok: false, error: 'quote.sol_mint must be base58' };
       }
