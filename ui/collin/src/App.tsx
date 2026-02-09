@@ -445,6 +445,15 @@ function App() {
     } catch (e: any) {
       out.ln_listfunds_error = e?.message || String(e);
     }
+    // If LN backend is docker, show compose service status in the checklist so operators can see
+    // whether the containers are actually running (without needing to run tools manually).
+    if (String(out?.env?.ln?.backend || '') === 'docker') {
+      try {
+        out.ln_docker_ps = await runDirectToolOnce('intercomswap_ln_docker_ps', {}, { auto_approve: false });
+      } catch (e: any) {
+        out.ln_docker_ps_error = e?.message || String(e);
+      }
+    }
     try {
       out.sol_signer = await runDirectToolOnce('intercomswap_sol_signer_pubkey', {}, { auto_approve: false });
     } catch (e: any) {
@@ -1331,14 +1340,31 @@ function App() {
 									<span className="chip">no channels</span>
 								)}
 	                </div>
-	                <div className="muted small">
-	                  Swaps can route over the LN network, but you still need an LN node with funds and typically at least one channel for paying invoices.
-	                </div>
-	                {preflight?.ln_listfunds_error ? <div className="alert bad">{String(preflight.ln_listfunds_error)}</div> : null}
-	                <div className="row">
-	                  {String(envInfo?.ln?.backend || '') === 'docker' ? (
-	                    <>
-	                      <button
+		                <div className="muted small">
+		                  Swaps can route over the LN network, but you still need an LN node with funds and typically at least one channel for paying invoices.
+		                </div>
+		                {preflight?.ln_listfunds_error ? <div className="alert bad">{String(preflight.ln_listfunds_error)}</div> : null}
+		                {String(envInfo?.ln?.backend || '') === 'docker' ? (
+		                  <>
+		                    {preflight?.ln_docker_ps_error ? (
+		                      <div className="alert bad">docker: {String(preflight.ln_docker_ps_error)}</div>
+		                    ) : null}
+		                    {Array.isArray(preflight?.ln_docker_ps?.services) ? (
+		                      <div className="muted small">
+		                        docker:{' '}
+		                        {preflight.ln_docker_ps.services.length === 0
+		                          ? 'down'
+		                          : preflight.ln_docker_ps.services
+		                              .map((s: any) => `${String(s?.service || 'svc')}:${String(s?.state || 'unknown')}`)
+		                              .join(' · ')}
+		                      </div>
+		                    ) : null}
+		                  </>
+		                ) : null}
+		                <div className="row">
+		                  {String(envInfo?.ln?.backend || '') === 'docker' ? (
+		                    <>
+		                      <button
 	                        className="btn primary"
 	                        disabled={runBusy}
 	                        onClick={async () => {
