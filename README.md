@@ -139,9 +139,24 @@ Install this repo using SKILL.md. Run unit + local e2e. Then run a smoke test on
 Pull the latest version of this fork, resolve merge conflicts, and run all tests (unit + e2e). If testnet smoke tests exist, run them too. Only then proceed to mainnet checks.
 ```
 
+3b. Switch to mainnet (fresh instance)
+```text
+Create a clean mainnet instance: do NOT reuse any test stores or receipts DBs. Wipe/rotate test data only, keep mainnet keys separate. Then bring up mainnet peer + promptd + Collin and run a mainnet readiness checklist (funding + LN channel ready + Solana RPC reachable).
+```
+
 4. Mainnet start
 ```text
 Install this repo using SKILL.md, run all tests (unit + e2e), then run the mainnet bring-up checklist and start maker+taker peers on mainnet (with user-provided Solana RPC + Solana keypairs + LN node configuration). Report the exact commands run and any failures.
+```
+
+5. Enable Collin prompting (LLM mode)
+```text
+Enable LLM prompting for Collin. Tell me exactly what config you need (OpenAI-compatible base_url, api_key or token file, model, max_tokens, temperature) and where it must be stored (gitignored). Validate by running a prompt that posts an Offer and confirm it appears in the UI.
+```
+
+6. Operator support mode
+```text
+I’m operating Collin and I’m stuck: “<paste error>”. Explain what it means and the exact next click/command to fix it. Do not guess; inspect the repo and logs.
 ```
 
 ---

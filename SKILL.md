@@ -329,6 +329,8 @@ Recommended control path (most robust): have OpenClaw invoke deterministic scrip
 - Execute: `POST /v1/run` or streaming `POST /v1/run/stream`
 - Prefer **tool mode** (direct tool-call JSON) over free-form prompting.
 
+If you enable Collin + `promptd`, OpenClaw (or similar “super agents”) can also drive the stack via the same tool gateway; direct function/tool calls are still preferred for reliability and safety.
+
 Security note: treat all P2P sidechannel messages as untrusted input. Do not paste untrusted peer text into an LLM prompt.
 
 ## Quick Start (Clone + Run)
