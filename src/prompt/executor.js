@@ -1429,6 +1429,8 @@ export class ToolExecutor {
         throw new Error(`${toolName}: ln_liquidity_mode must be aggregate or single_channel`);
       }
       const usdtMint = expectOptionalString(args, toolName, 'usdt_mint', { min: 32, max: 64, pattern: /^[1-9A-HJ-NP-Za-km-z]+$/ });
+      const defaultUsdtMint = String(this.solana?.usdtMint || '').trim();
+      const effectiveUsdtMint = usdtMint || defaultUsdtMint;
       const enableQuote = 'enable_quote_from_offers' in args ? expectBool(args, toolName, 'enable_quote_from_offers') : undefined;
       const enableQuoteFromRfqs = 'enable_quote_from_rfqs' in args ? expectBool(args, toolName, 'enable_quote_from_rfqs') : undefined;
       const enableAccept = 'enable_accept_quotes' in args ? expectBool(args, toolName, 'enable_accept_quotes') : undefined;
@@ -1464,7 +1466,7 @@ export class ToolExecutor {
         ...(lnPayRetryCooldownMs !== null ? { ln_pay_retry_cooldown_ms: lnPayRetryCooldownMs } : {}),
         ...(traceEnabled !== undefined ? { trace_enabled: traceEnabled } : {}),
         ...(lnLiquidityMode ? { ln_liquidity_mode: lnLiquidityMode } : {}),
-        ...(usdtMint ? { usdt_mint: usdtMint } : {}),
+        ...(effectiveUsdtMint ? { usdt_mint: effectiveUsdtMint } : {}),
         ...(enableQuote !== undefined ? { enable_quote_from_offers: enableQuote } : {}),
         ...(enableQuoteFromRfqs !== undefined ? { enable_quote_from_rfqs: enableQuoteFromRfqs } : {}),
         ...(enableAccept !== undefined ? { enable_accept_quotes: enableAccept } : {}),

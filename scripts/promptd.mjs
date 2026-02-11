@@ -341,6 +341,7 @@ async function main() {
         'intercomswap_tradeauto_start',
         {
           channels: tradeAutoBootstrap.channels,
+          usdt_mint: String(setup?.solana?.usdtMint || '').trim(),
           trace_enabled: tradeAutoBootstrap.traceEnabled,
           ln_liquidity_mode: 'aggregate',
           enable_quote_from_offers: true,
