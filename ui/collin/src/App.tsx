@@ -9047,37 +9047,66 @@ function QuoteRow({
   const btcUsd = btcSats !== null && oracleBtcUsd ? (btcSats / 1e8) * oracleBtcUsd : null;
   const usdtNum = usdtAtomic ? atomicToNumber(usdtAtomic, 6) : null;
   const usdtUsd = usdtNum !== null && oracleUsdtUsd ? usdtNum * oracleUsdtUsd : null;
+  const btcBtc = btcSats !== null ? btcSats / 1e8 : null;
+  const btcDisplay = btcBtc !== null ? formatHumanNumber(btcBtc, { maxFractionDigits: 8 }) : '?';
+  const usdtDisplay =
+    usdtNum !== null
+      ? formatHumanNumber(usdtNum, { maxFractionDigits: 6 })
+      : usdtAtomic
+        ? atomicToDecimal(usdtAtomic, 6)
+        : '?';
+  const pricePerBtc = btcBtc !== null && btcBtc > 0 && usdtNum !== null ? usdtNum / btcBtc : null;
+  const priceDisplay = pricePerBtc !== null ? formatHumanNumber(pricePerBtc, { maxFractionDigits: 2 }) : '?';
+  const feeDisplay = `${typeof platformFee === 'number' ? `${platformFee} bps (${bpsToPctDisplay(platformFee)}%)` : '?'} platform, ${
+    typeof tradeFee === 'number' ? `${tradeFee} bps (${bpsToPctDisplay(tradeFee)}%)` : '?'
+  } trade, ${typeof totalFee === 'number' ? `${totalFee} bps (${bpsToPctDisplay(totalFee)}%)` : '?'} total`;
+  const refundWindowDisplay = typeof solWindow === 'number' ? `${secToHuman(solWindow)} (${solWindow}s)` : '?';
   return (
     <div className={`rowitem ${expired ? 'expired' : ''}`} role="button" onClick={onSelect}>
       <div className="rowitem-top">
-        {postedIso ? <span className="mono dim">{postedIso}</span> : null}
         <span className="mono chip">{evt.channel}</span>
         {expired ? <span className="mono chip warn">expired</span> : null}
-        {tradeId ? <span className="mono dim">{tradeId}</span> : null}
       </div>
       <div className="rowitem-mid">
-        <span className="mono">quote for your RFQ</span>
-        {rfqId ? <span className="mono dim">rfq_id: {rfqId}</span> : null}
-        <span className="mono">
-          BTC: {btcSats !== null ? `${satsToBtcDisplay(btcSats)} BTC (${btcSats} sats)` : '?'}
-          {btcUsd !== null ? ` ≈ ${fmtUsd(btcUsd)}` : ''}
-        </span>
-        <span className="mono">
-          USDT: {usdtAtomic ? `${atomicToDecimal(usdtAtomic, 6)} (${usdtAtomic})` : '?'}
-          {usdtUsd !== null ? ` ≈ ${fmtUsd(usdtUsd)}` : ''}
-        </span>
-        <span className="mono">
-          fees:{' '}
-          {typeof platformFee === 'number' ? `${platformFee} bps (${bpsToPctDisplay(platformFee)}%)` : '?'} platform,{' '}
-          {typeof tradeFee === 'number' ? `${tradeFee} bps (${bpsToPctDisplay(tradeFee)}%)` : '?'} trade,{' '}
-          {typeof totalFee === 'number' ? `${totalFee} bps (${bpsToPctDisplay(totalFee)}%)` : '?'} total
-        </span>
-        <span className="mono">
-          sol window: {typeof solWindow === 'number' ? `${secToHuman(solWindow)} (${solWindow}s)` : '?'}
-        </span>
-        <span className="mono">
-          expires: {validUntilIso || '?'}{typeof validUntil === 'number' ? ` (${validUntil})` : ''}
-        </span>
+        <div className="trade-activity">
+          <div className="trade-activity-headline">
+            Sell <span className="mono">{btcDisplay}</span> BTC for <span className="mono">{usdtDisplay}</span> USDT
+          </div>
+          <div className="trade-activity-price">
+            Price / BTC: <span className="mono">{priceDisplay}</span> USDT
+          </div>
+          <div className="trade-activity-details">
+            <span>
+              <span className="muted">Quote:</span> <span className="mono">{shortMonoId(tradeId) || '?'}</span>
+            </span>
+            <span>
+              <span className="muted">RFQ ID:</span> <span className="mono">{shortMonoId(rfqId) || '?'}</span>
+            </span>
+            <span>
+              <span className="muted">Posted:</span> <span className="mono">{postedIso || '?'}</span>
+            </span>
+            <span>
+              <span className="muted">Expires:</span>{' '}
+              <span className="mono">{validUntilIso || '?'}{typeof validUntil === 'number' ? ` (${validUntil})` : ''}</span>
+            </span>
+            <span>
+              <span className="muted">Fees:</span> <span className="mono">{feeDisplay}</span>
+            </span>
+            <span>
+              <span className="muted">Refund Window:</span> <span className="mono">{refundWindowDisplay}</span>
+            </span>
+            {btcUsd !== null ? (
+              <span>
+                <span className="muted">BTC Value:</span> <span className="mono">{fmtUsd(btcUsd)}</span>
+              </span>
+            ) : null}
+            {usdtUsd !== null ? (
+              <span>
+                <span className="muted">USDT Value:</span> <span className="mono">{fmtUsd(usdtUsd)}</span>
+              </span>
+            ) : null}
+          </div>
+        </div>
       </div>
       <div className="rowitem-bot">
         <button
