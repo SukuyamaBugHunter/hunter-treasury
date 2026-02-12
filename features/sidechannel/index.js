@@ -106,9 +106,9 @@ class Sidechannel extends Feature {
           .map((value) => normalizeKeyHex(value))
           .filter((value) => value && value.length > 0)
       : [];
-    if (this.inviteRequired && inviterKeys.length === 0) {
+    if (this.inviteRequired) {
       const selfKey = normalizeKeyHex(this.peer?.wallet?.publicKey);
-      if (selfKey) inviterKeys.push(selfKey);
+      if (selfKey && !inviterKeys.includes(selfKey)) inviterKeys.push(selfKey);
     }
     this.inviterKeys = inviterKeys.length > 0 ? new Set(inviterKeys) : null;
     this.inviteTtlMs = Number.isSafeInteger(config.inviteTtlMs) ? config.inviteTtlMs : 0;

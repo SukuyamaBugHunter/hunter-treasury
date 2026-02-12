@@ -4113,6 +4113,42 @@ export class ToolExecutor {
         const signed = signSwapEnvelope(unsigned, signing);
 
         const sc = await this._scEnsurePersistent({ timeoutMs: 10_000 });
+        // Ensure maker can always join/send on invite-required swap:* channels even when
+        // sidechannel_inviter_keys was populated with only remote keys.
+        try {
+          const addRes = await sc.addInviterKey(ownerPubKey);
+          if (addRes?.type === 'error') {
+            throw new Error(addRes?.error || 'inviter_add failed');
+          }
+        } catch (err) {
+          throw new Error(
+            `${toolName}: failed to register maker inviter key ${ownerPubKey} before join: ${err?.message || String(err)}`
+          );
+        }
+
+        // Persist learned self inviter key in local peer state so restarts keep working.
+        try {
+          const { peerStatus, peerAddInviterKey } = await import('../peer/peerManager.js');
+          const status = peerStatus({ repoRoot: process.cwd(), name: '' });
+          const scPort = (() => {
+            try {
+              const u = new URL(String(this.scBridge?.url || '').trim());
+              const p = u.port ? Number.parseInt(u.port, 10) : 0;
+              return Number.isFinite(p) && p > 0 ? p : 49222;
+            } catch (_e) {
+              return 49222;
+            }
+          })();
+          const activePeer =
+            Array.isArray(status?.peers)
+              ? status.peers.find((p) => Boolean(p?.alive) && Number(p?.sc_bridge?.port) === scPort)
+              : null;
+          const peerName = String(activePeer?.name || '').trim();
+          if (peerName) {
+            await peerAddInviterKey({ repoRoot: process.cwd(), name: peerName, pubkey: ownerPubKey });
+          }
+        } catch (_e) {}
+
         await this._sendEnvelopeLogged(sc, channel, signed);
         invitePosted = true;
 
