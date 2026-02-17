@@ -293,6 +293,9 @@ Edit `onchain/prompt/setup.json`:
   - `llm.prompt_profile: "functiongemma_minimal"`
   - `llm.tool_schema_profile: "minimal"`
   - omit `llm.response_format` unless your backend requires it
+- FunctionGemma model repo (all flavors in one place):
+  - Hugging Face: `https://huggingface.co/TracNetwork/functiongemma-270m-it-intercomswap-v3`
+  - This single repo contains `base` (root files), `nvfp4` (`/nvfp4`), and `gguf` (`/gguf`).
 - `peer.keypair`: path to the peer wallet keypair file (usually `stores/<store>/db/keypair.json`) so tools can sign sidechannel envelopes locally
 - `sc_bridge.token` or `sc_bridge.token_file`: SC‑Bridge auth
 - `ln.wallet_password_file`: recommended explicit LND unlock password file path under `onchain/` (example: `onchain/lnd/mainnet/maker.wallet-password.txt`)
